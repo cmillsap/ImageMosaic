@@ -136,6 +136,29 @@ class ImageTileAnalyzer:
         except Exception as e:
             raise ValueError(f"Failed to process image {image_path}: {str(e)}")
 
+    def analyze_pil_image(self, img: Image.Image, source_path: str) -> TileData:
+        """
+        Analyze a PIL Image object directly (for preprocessed images).
+
+        Args:
+            img: PIL Image object to analyze
+            source_path: Original path to the source image (for reference)
+
+        Returns:
+            TileData object containing section information
+
+        Raises:
+            ValueError: If image cannot be processed
+        """
+        try:
+            if img.mode != 'RGB':
+                img = img.convert('RGB')
+
+            sections = self._create_sections(img)
+            return TileData(source_path, sections)
+        except Exception as e:
+            raise ValueError(f"Failed to process image: {str(e)}")
+
     def _create_sections(self, img: Image.Image) -> List[SectionData]:
         """
         Split image into 9 sections and calculate average colors.

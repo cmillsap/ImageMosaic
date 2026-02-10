@@ -8,10 +8,13 @@ Uses scikit-learn's optimized NearestNeighbors implementation for performance.
 
 import os
 import numpy as np
-from typing import List, Tuple, Optional
+from typing import List, Tuple, Optional, TYPE_CHECKING
 from dataclasses import dataclass
 from sklearn.neighbors import NearestNeighbors
 from tile_analyzer import TileData, ImageTileAnalyzer, ColorAverage
+
+if TYPE_CHECKING:
+    from tile_preprocessor import TilePreprocessor
 
 
 @dataclass
@@ -32,7 +35,8 @@ class TileDatabase:
     for fast similarity search based on 9-section color averages.
     """
 
-    def __init__(self, algorithm: str = 'auto', metric: str = 'euclidean'):
+    def __init__(self, algorithm: str = 'auto', metric: str = 'euclidean',
+                 preprocessor: Optional['TilePreprocessor'] = None):
         """
         Initialize an empty tile database.
 
@@ -42,6 +46,8 @@ class TileDatabase:
                       'auto' will choose the best algorithm based on data
             metric: Distance metric to use. Default is 'euclidean'.
                    Other options: 'manhattan', 'chebyshev', 'minkowski'
+            preprocessor: Optional TilePreprocessor for cropping/resizing tiles
+                         before analysis. If None, tiles are analyzed as-is.
         """
         self._tiles: List[TileData] = []
         self._analyzer = ImageTileAnalyzer()
@@ -50,6 +56,7 @@ class TileDatabase:
         self._algorithm = algorithm
         self._metric = metric
         self._is_fitted = False
+        self._preprocessor = preprocessor
 
     def add_tile(self, tile_data: TileData) -> None:
         """
@@ -76,7 +83,11 @@ class TileDatabase:
             FileNotFoundError: If image file doesn't exist
             ValueError: If image cannot be analyzed
         """
-        tile_data = self._analyzer.analyze_image(image_path)
+        if self._preprocessor:
+            processed_img = self._preprocessor.preprocess_image(image_path)
+            tile_data = self._analyzer.analyze_pil_image(processed_img, image_path)
+        else:
+            tile_data = self._analyzer.analyze_image(image_path)
         self.add_tile(tile_data)
 
     def load_tiles_from_folder(self, folder_path: str,
