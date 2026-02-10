@@ -92,7 +92,8 @@ class TileDatabase:
 
     def load_tiles_from_folder(self, folder_path: str,
                                extensions: Optional[List[str]] = None,
-                               auto_build_index: bool = True) -> int:
+                               auto_build_index: bool = True,
+                               recursive: bool = False) -> int:
         """
         Load all tile images from a folder.
 
@@ -101,6 +102,7 @@ class TileDatabase:
             extensions: List of file extensions to include (e.g., ['.png', '.jpg'])
                        If None, defaults to common image formats
             auto_build_index: If True, automatically builds the search index after loading
+            recursive: If True, also scan subdirectories for tile images
 
         Returns:
             Number of tiles successfully loaded
@@ -123,23 +125,41 @@ class TileDatabase:
         loaded_count = 0
         failed_files = []
 
-        for filename in os.listdir(folder_path):
-            file_path = os.path.join(folder_path, filename)
+        if recursive:
+            # Walk through all subdirectories
+            for root, dirs, files in os.walk(folder_path):
+                for filename in files:
+                    file_path = os.path.join(root, filename)
 
-            # Skip if not a file
-            if not os.path.isfile(file_path):
-                continue
+                    # Check file extension
+                    _, ext = os.path.splitext(filename)
+                    if ext.lower() not in extensions:
+                        continue
 
-            # Check file extension
-            _, ext = os.path.splitext(filename)
-            if ext.lower() not in extensions:
-                continue
+                    try:
+                        self.add_tile_from_path(file_path)
+                        loaded_count += 1
+                    except Exception as e:
+                        failed_files.append((file_path, str(e)))
+        else:
+            # Only scan the top-level folder
+            for filename in os.listdir(folder_path):
+                file_path = os.path.join(folder_path, filename)
 
-            try:
-                self.add_tile_from_path(file_path)
-                loaded_count += 1
-            except Exception as e:
-                failed_files.append((filename, str(e)))
+                # Skip if not a file
+                if not os.path.isfile(file_path):
+                    continue
+
+                # Check file extension
+                _, ext = os.path.splitext(filename)
+                if ext.lower() not in extensions:
+                    continue
+
+                try:
+                    self.add_tile_from_path(file_path)
+                    loaded_count += 1
+                except Exception as e:
+                    failed_files.append((filename, str(e)))
 
         # Build index if requested and tiles were loaded
         if auto_build_index and loaded_count > 0:

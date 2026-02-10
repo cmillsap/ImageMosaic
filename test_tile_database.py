@@ -349,6 +349,109 @@ class TestTileDatabaseFolderLoading:
         # Should only load the 3 image files
         assert count == 3
 
+    def test_load_tiles_recursive(self, tmp_path):
+        """Test loading tiles recursively from subdirectories."""
+        folder = tmp_path / "tiles"
+        folder.mkdir()
+
+        # Create images in root folder
+        for i in range(2):
+            img = Image.new('RGB', (90, 90), (i * 50, 0, 0))
+            img.save(folder / f"tile_{i}.png")
+
+        # Create subdirectory with more images
+        subfolder = folder / "subdir"
+        subfolder.mkdir()
+        for i in range(3):
+            img = Image.new('RGB', (90, 90), (0, i * 50, 0))
+            img.save(subfolder / f"subtile_{i}.png")
+
+        # Create nested subdirectory
+        nested = subfolder / "nested"
+        nested.mkdir()
+        for i in range(2):
+            img = Image.new('RGB', (90, 90), (0, 0, i * 50))
+            img.save(nested / f"nested_{i}.png")
+
+        db = TileDatabase()
+        count = db.load_tiles_from_folder(str(folder), recursive=True)
+
+        # Should load 2 + 3 + 2 = 7 images
+        assert count == 7
+        assert len(db) == 7
+
+    def test_load_tiles_non_recursive_ignores_subdirs(self, tmp_path):
+        """Test that non-recursive loading ignores subdirectories."""
+        folder = tmp_path / "tiles"
+        folder.mkdir()
+
+        # Create images in root folder
+        for i in range(2):
+            img = Image.new('RGB', (90, 90), (i * 50, 0, 0))
+            img.save(folder / f"tile_{i}.png")
+
+        # Create subdirectory with more images
+        subfolder = folder / "subdir"
+        subfolder.mkdir()
+        for i in range(3):
+            img = Image.new('RGB', (90, 90), (0, i * 50, 0))
+            img.save(subfolder / f"subtile_{i}.png")
+
+        db = TileDatabase()
+        count = db.load_tiles_from_folder(str(folder), recursive=False)
+
+        # Should only load the 2 images in root folder
+        assert count == 2
+        assert len(db) == 2
+
+    def test_load_tiles_recursive_with_extension_filter(self, tmp_path):
+        """Test recursive loading with file extension filter."""
+        folder = tmp_path / "tiles"
+        folder.mkdir()
+        subfolder = folder / "subdir"
+        subfolder.mkdir()
+
+        # Create PNG files in root
+        for i in range(2):
+            img = Image.new('RGB', (90, 90), (i * 50, 0, 0))
+            img.save(folder / f"tile_{i}.png")
+
+        # Create JPG files in subdirectory
+        for i in range(3):
+            img = Image.new('RGB', (90, 90), (0, i * 50, 0))
+            img.save(subfolder / f"subtile_{i}.jpg")
+
+        # Create PNG files in subdirectory
+        for i in range(2):
+            img = Image.new('RGB', (90, 90), (0, 0, i * 50))
+            img.save(subfolder / f"subtile_png_{i}.png")
+
+        db = TileDatabase()
+        count = db.load_tiles_from_folder(str(folder), extensions=['.png'], recursive=True)
+
+        # Should only load the 4 PNG files (2 in root + 2 in subfolder)
+        assert count == 4
+
+    def test_load_tiles_recursive_empty_subdirs(self, tmp_path):
+        """Test recursive loading with empty subdirectories."""
+        folder = tmp_path / "tiles"
+        folder.mkdir()
+
+        # Create images in root folder
+        for i in range(2):
+            img = Image.new('RGB', (90, 90), (i * 50, 0, 0))
+            img.save(folder / f"tile_{i}.png")
+
+        # Create empty subdirectories
+        (folder / "empty1").mkdir()
+        (folder / "empty2").mkdir()
+
+        db = TileDatabase()
+        count = db.load_tiles_from_folder(str(folder), recursive=True)
+
+        # Should only load the 2 images in root folder
+        assert count == 2
+
 
 class TestSearchResult:
     """Tests for SearchResult dataclass."""

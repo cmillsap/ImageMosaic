@@ -1,8 +1,9 @@
 import sys
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                               QHBoxLayout, QPushButton, QLabel, QLineEdit,
-                              QFileDialog, QGroupBox, QSizePolicy, QSpinBox)
-from PyQt6.QtCore import Qt
+                              QFileDialog, QGroupBox, QSizePolicy, QSpinBox,
+                              QCheckBox, QProgressBar)
+from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QPixmap
 
 
@@ -11,6 +12,7 @@ class MosaicApp(QMainWindow):
         super().__init__()
         self.guide_image_path = None
         self.tile_folder_path = None
+        self.scan_subdirectories = False
         self.output_dpi = 300
         self.output_width_inches = 20
         self.output_height_inches = 30
@@ -69,6 +71,13 @@ class MosaicApp(QMainWindow):
         path_layout.addWidget(browse_btn)
 
         tile_folder_layout.addLayout(path_layout)
+
+        # Checkbox for scanning subdirectories
+        self.subdirs_checkbox = QCheckBox("Include subdirectories")
+        self.subdirs_checkbox.setChecked(False)
+        self.subdirs_checkbox.stateChanged.connect(self.update_scan_subdirectories)
+        tile_folder_layout.addWidget(self.subdirs_checkbox)
+
         tile_folder_group.setLayout(tile_folder_layout)
         main_layout.addWidget(tile_folder_group)
 
@@ -109,7 +118,7 @@ class MosaicApp(QMainWindow):
         generate_layout.addStretch()
 
         self.generate_btn = QPushButton("Generate Mosaic")
-        self.generate_btn.setEnabled(False)  # Disabled for now
+        self.generate_btn.setEnabled(False)
         self.generate_btn.setMinimumWidth(150)
         self.generate_btn.setStyleSheet("""
             QPushButton {
@@ -118,10 +127,50 @@ class MosaicApp(QMainWindow):
                 font-weight: bold;
             }
         """)
+        self.generate_btn.clicked.connect(self.demo_generate_mosaic)
         generate_layout.addWidget(self.generate_btn)
         generate_layout.addStretch()
 
         main_layout.addLayout(generate_layout)
+
+        # Progress Section
+        self.progress_group = QGroupBox("Progress")
+        progress_layout = QVBoxLayout()
+
+        # Status label showing current task
+        self.progress_status_label = QLabel("Ready")
+        self.progress_status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.progress_status_label.setStyleSheet("""
+            QLabel {
+                font-size: 12px;
+                color: #555;
+                padding: 5px;
+            }
+        """)
+        progress_layout.addWidget(self.progress_status_label)
+
+        # Progress bar
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(0)
+        self.progress_bar.setTextVisible(True)
+        self.progress_bar.setStyleSheet("""
+            QProgressBar {
+                border: 1px solid #ccc;
+                border-radius: 5px;
+                text-align: center;
+                height: 25px;
+            }
+            QProgressBar::chunk {
+                background-color: #4CAF50;
+                border-radius: 4px;
+            }
+        """)
+        progress_layout.addWidget(self.progress_bar)
+
+        self.progress_group.setLayout(progress_layout)
+        self.progress_group.setVisible(False)  # Hidden by default
+        main_layout.addWidget(self.progress_group)
 
         # Add stretch to push everything to the top
         main_layout.addStretch()
@@ -186,12 +235,139 @@ class MosaicApp(QMainWindow):
             self.folder_path_edit.setText(folder_path)
             self.check_ready_to_generate()
 
+    def update_scan_subdirectories(self, state):
+        """Update the scan subdirectories setting based on checkbox state"""
+        self.scan_subdirectories = state == Qt.CheckState.Checked.value
+
     def check_ready_to_generate(self):
         """Enable generate button if both guide image and tile folder are selected"""
         if self.guide_image_path and self.tile_folder_path:
             self.generate_btn.setEnabled(True)
         else:
             self.generate_btn.setEnabled(False)
+
+    # Progress UI Methods
+
+    def show_progress(self):
+        """Show the progress section and prepare for a new task."""
+        self.progress_group.setVisible(True)
+        self.progress_bar.setValue(0)
+        self.progress_status_label.setText("Starting...")
+        self.generate_btn.setEnabled(False)
+
+    def hide_progress(self):
+        """Hide the progress section and reset to ready state."""
+        self.progress_group.setVisible(False)
+        self.progress_bar.setValue(0)
+        self.progress_status_label.setText("Ready")
+        self.check_ready_to_generate()
+
+    def set_progress_status(self, status: str):
+        """
+        Set the current task status text.
+
+        Args:
+            status: Description of the current task (e.g., "Loading tiles...",
+                   "Analyzing guide image...", "Generating mosaic...")
+        """
+        self.progress_status_label.setText(status)
+        # Process events to update UI immediately
+        QApplication.processEvents()
+
+    def set_progress_value(self, value: int):
+        """
+        Set the progress bar value.
+
+        Args:
+            value: Progress percentage (0-100)
+        """
+        self.progress_bar.setValue(max(0, min(100, value)))
+        # Process events to update UI immediately
+        QApplication.processEvents()
+
+    def set_progress(self, status: str, value: int):
+        """
+        Set both status text and progress value at once.
+
+        Args:
+            status: Description of the current task
+            value: Progress percentage (0-100)
+        """
+        self.progress_status_label.setText(status)
+        self.progress_bar.setValue(max(0, min(100, value)))
+        # Process events to update UI immediately
+        QApplication.processEvents()
+
+    def start_task(self, task_name: str):
+        """
+        Start a new subtask, resetting progress to 0.
+
+        Args:
+            task_name: Name of the task to display (e.g., "Loading tiles...")
+        """
+        self.progress_status_label.setText(task_name)
+        self.progress_bar.setValue(0)
+        QApplication.processEvents()
+
+    def complete_task(self):
+        """Mark the current task as complete (sets progress to 100%)."""
+        self.progress_bar.setValue(100)
+        QApplication.processEvents()
+
+    # Demo/Test Methods (remove when real generation is implemented)
+
+    def demo_generate_mosaic(self):
+        """
+        Demo method to test the progress UI.
+        Simulates the mosaic generation process with fake progress.
+        Remove this method when real generation is implemented.
+        """
+        self.show_progress()
+
+        # Define demo tasks with their simulated step counts
+        self._demo_tasks = [
+            ("Loading tiles...", 25),
+            ("Preprocessing tiles...", 20),
+            ("Analyzing guide image...", 10),
+            ("Building tile database...", 15),
+            ("Matching tiles to guide...", 40),
+            ("Assembling mosaic...", 30),
+            ("Saving output...", 5),
+        ]
+        self._demo_task_index = 0
+        self._demo_step = 0
+        self._demo_steps_for_task = 0
+
+        # Start the demo with a timer
+        self._demo_timer = QTimer()
+        self._demo_timer.timeout.connect(self._demo_tick)
+        self._start_next_demo_task()
+        self._demo_timer.start(50)  # 50ms per tick for smooth animation
+
+    def _start_next_demo_task(self):
+        """Start the next demo task."""
+        if self._demo_task_index < len(self._demo_tasks):
+            task_name, steps = self._demo_tasks[self._demo_task_index]
+            self._demo_steps_for_task = steps
+            self._demo_step = 0
+            self.start_task(task_name)
+        else:
+            # All tasks complete
+            self._demo_timer.stop()
+            self.set_progress("Complete!", 100)
+            # Hide progress after a short delay
+            QTimer.singleShot(1500, self.hide_progress)
+
+    def _demo_tick(self):
+        """Process one tick of the demo animation."""
+        self._demo_step += 1
+        progress = int((self._demo_step / self._demo_steps_for_task) * 100)
+        self.set_progress_value(progress)
+
+        if self._demo_step >= self._demo_steps_for_task:
+            # Move to next task
+            self._demo_task_index += 1
+            self._start_next_demo_task()
 
 
 def main():
