@@ -6,6 +6,8 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QPixmap
 
+from tile_preprocessor import PreprocessorConfig
+
 
 class MosaicApp(QMainWindow):
     def __init__(self):
@@ -16,6 +18,8 @@ class MosaicApp(QMainWindow):
         self.output_dpi = 300
         self.output_width_inches = 20
         self.output_height_inches = 30
+        self.tile_width = 100
+        self.tile_height = 100
         self.init_ui()
 
     def init_ui(self):
@@ -81,6 +85,38 @@ class MosaicApp(QMainWindow):
         tile_folder_group.setLayout(tile_folder_layout)
         main_layout.addWidget(tile_folder_group)
 
+        # Tile Settings Section
+        tile_settings_group = QGroupBox("Tile Settings")
+        tile_settings_layout = QVBoxLayout()
+
+        tile_size_layout = QHBoxLayout()
+
+        tile_size_layout.addWidget(QLabel("Tile width (px):"))
+        self.tile_width_spinbox = QSpinBox()
+        self.tile_width_spinbox.setRange(8, 2000)
+        self.tile_width_spinbox.setValue(self.tile_width)
+        self.tile_width_spinbox.valueChanged.connect(self.update_derived_dimensions)
+        tile_size_layout.addWidget(self.tile_width_spinbox)
+
+        tile_size_layout.addWidget(QLabel("Tile height (px):"))
+        self.tile_height_spinbox = QSpinBox()
+        self.tile_height_spinbox.setRange(8, 2000)
+        self.tile_height_spinbox.setValue(self.tile_height)
+        self.tile_height_spinbox.valueChanged.connect(self.update_derived_dimensions)
+        tile_size_layout.addWidget(self.tile_height_spinbox)
+
+        tile_size_layout.addStretch()
+        tile_settings_layout.addLayout(tile_size_layout)
+
+        # Aspect ratio readout - tiles are cropped to this ratio by the
+        # preprocessor, so it is also the shape of every guide grid cell.
+        self.tile_aspect_label = QLabel()
+        self.tile_aspect_label.setStyleSheet("QLabel { color: #555; }")
+        tile_settings_layout.addWidget(self.tile_aspect_label)
+
+        tile_settings_group.setLayout(tile_settings_layout)
+        main_layout.addWidget(tile_settings_group)
+
         # Output Settings Section
         output_settings_group = QGroupBox("Output Settings")
         output_settings_layout = QVBoxLayout()
@@ -92,14 +128,14 @@ class MosaicApp(QMainWindow):
         self.width_spinbox = QSpinBox()
         self.width_spinbox.setRange(1, 100)
         self.width_spinbox.setValue(self.output_width_inches)
-        self.width_spinbox.valueChanged.connect(self.update_output_dimensions)
+        self.width_spinbox.valueChanged.connect(self.update_derived_dimensions)
         size_layout.addWidget(self.width_spinbox)
 
         size_layout.addWidget(QLabel("Height (inches):"))
         self.height_spinbox = QSpinBox()
         self.height_spinbox.setRange(1, 100)
         self.height_spinbox.setValue(self.output_height_inches)
-        self.height_spinbox.valueChanged.connect(self.update_output_dimensions)
+        self.height_spinbox.valueChanged.connect(self.update_derived_dimensions)
         size_layout.addWidget(self.height_spinbox)
 
         size_layout.addStretch()
@@ -107,8 +143,15 @@ class MosaicApp(QMainWindow):
 
         # Pixel dimensions label
         self.output_dimensions_label = QLabel()
-        self.update_output_dimensions()
         output_settings_layout.addWidget(self.output_dimensions_label)
+
+        # Derived tile grid readout
+        self.grid_info_label = QLabel()
+        self.grid_info_label.setStyleSheet("QLabel { color: #555; }")
+        output_settings_layout.addWidget(self.grid_info_label)
+
+        # All labels exist now, so it is safe to populate them.
+        self.update_derived_dimensions()
 
         output_settings_group.setLayout(output_settings_layout)
         main_layout.addWidget(output_settings_group)
@@ -204,15 +247,42 @@ class MosaicApp(QMainWindow):
         else:
             self.guide_image_label.setText("Failed to load image")
 
-    def update_output_dimensions(self):
-        """Update the pixel dimensions label based on current spin box values"""
+    def update_derived_dimensions(self):
+        """Recompute output pixel size and the tile grid from the spin boxes.
+
+        Single entry point for every size control, so the pixel readout, the
+        tile aspect ratio and the grid summary can never drift apart.
+        """
         self.output_width_inches = self.width_spinbox.value()
         self.output_height_inches = self.height_spinbox.value()
+        self.tile_width = self.tile_width_spinbox.value()
+        self.tile_height = self.tile_height_spinbox.value()
+
         w = self.output_width_px
         h = self.output_height_px
         self.output_dimensions_label.setText(
             f"Output: {w} \u00d7 {h} px ({self.output_dpi} DPI)"
         )
+
+        self.tile_aspect_label.setText(
+            f"Tile aspect ratio: {self.tile_aspect_ratio:.3f} "
+            f"({self.tile_width}:{self.tile_height})"
+        )
+
+        cols, rows = self.grid_cols, self.grid_rows
+        if cols == 0 or rows == 0:
+            self.grid_info_label.setText(
+                "\u26a0 Tile is larger than the output canvas - no tiles fit."
+            )
+            self.grid_info_label.setStyleSheet("QLabel { color: #c0392b; }")
+            return
+
+        rem_x, rem_y = self.remainder_px
+        text = (f"Grid: {cols} \u00d7 {rows} = {self.total_tiles:,} tiles")
+        if rem_x or rem_y:
+            text += f"  \u00b7  {rem_x} \u00d7 {rem_y} px unused at edges"
+        self.grid_info_label.setText(text)
+        self.grid_info_label.setStyleSheet("QLabel { color: #555; }")
 
     @property
     def output_width_px(self):
@@ -221,6 +291,44 @@ class MosaicApp(QMainWindow):
     @property
     def output_height_px(self):
         return self.output_height_inches * self.output_dpi
+
+    @property
+    def tile_aspect_ratio(self):
+        """Width / height of a single tile."""
+        return self.tile_width / self.tile_height
+
+    @property
+    def grid_cols(self):
+        """Number of whole tiles that fit across the output."""
+        return self.output_width_px // self.tile_width
+
+    @property
+    def grid_rows(self):
+        """Number of whole tiles that fit down the output."""
+        return self.output_height_px // self.tile_height
+
+    @property
+    def total_tiles(self):
+        """Total tile placements in the mosaic."""
+        return self.grid_cols * self.grid_rows
+
+    @property
+    def remainder_px(self):
+        """(x, y) pixels left over that no whole tile covers."""
+        return (self.output_width_px - self.grid_cols * self.tile_width,
+                self.output_height_px - self.grid_rows * self.tile_height)
+
+    def build_preprocessor_config(self, **overrides) -> PreprocessorConfig:
+        """Build a PreprocessorConfig from the UI's tile dimensions.
+
+        The preprocessor crops tiles to this aspect ratio and GuideImage cuts
+        grid cells at these same dimensions. Deriving both from one place is
+        what keeps them in agreement - a mismatch would distort every tile.
+        """
+        params = dict(target_width=self.tile_width,
+                      target_height=self.tile_height)
+        params.update(overrides)
+        return PreprocessorConfig(**params)
 
     def select_tile_folder(self):
         """Open folder dialog to select tile images folder"""

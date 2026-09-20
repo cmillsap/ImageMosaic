@@ -21,6 +21,11 @@ from tile_preprocessor import (
     OPENCV_AVAILABLE,
 )
 
+if OPENCV_AVAILABLE:
+    import cv2
+else:  # pragma: no cover - exercised only on installs without OpenCV
+    cv2 = None
+
 
 # ============================================================================
 # Fixtures
@@ -314,20 +319,31 @@ class TestFaceDetector:
         assert len(faces) == 0
 
     @pytest.mark.skipif(not OPENCV_AVAILABLE, reason="OpenCV not installed")
+    def test_cascade_actually_loads(self):
+        """The Haar cascade must load, not silently fall back to no-op detection.
+
+        Regression guard: detect_faces() swallows every failure and returns [],
+        so an unloadable cascade is indistinguishable from "no faces present"
+        unless initialization is asserted directly.
+        """
+        detector = FaceDetector()
+        assert detector._ensure_initialized() is True, (
+            f"Haar cascade failed to load: {detector._init_error}"
+        )
+        assert detector._cascade is not None
+        assert not detector._cascade.empty()
+
+    @pytest.mark.skipif(not OPENCV_AVAILABLE, reason="OpenCV not installed")
     def test_returns_crop_regions(self, temp_dir):
         """Detected faces should be CropRegion objects."""
-        # Create a mock that returns face coordinates
         detector = FaceDetector()
-        detector._ensure_initialized()
+        if not detector._ensure_initialized():
+            pytest.fail(f"Haar cascade not available: {detector._init_error}")
 
-        if detector._cascade is None:
-            pytest.skip("Haar cascade not available")
-
-        # Create a blank image for testing the return type
         img = Image.new('RGB', (200, 200), color=(128, 128, 128))
         faces = detector.detect_faces(img)
-        # The list may be empty, but that's okay for this test
         assert isinstance(faces, list)
+        assert all(isinstance(f, CropRegion) for f in faces)
 
 
 # ============================================================================
@@ -347,21 +363,44 @@ class TestSaliencyDetector:
             assert result is None
 
     @pytest.mark.skipif(not OPENCV_AVAILABLE, reason="OpenCV not installed")
+    def test_saliency_backend_is_available(self):
+        """cv2.saliency must exist, i.e. opencv-CONTRIB-python is installed.
+
+        Regression guard: the base `opencv-python` package does not ship the
+        saliency module, so SaliencyDetector silently degrades to returning
+        None for every image and all cropping falls back to center-crop.
+        """
+        assert hasattr(cv2, 'saliency'), (
+            "cv2.saliency missing - install opencv-contrib-python, "
+            "not opencv-python (see requirements.txt)"
+        )
+        detector = SaliencyDetector()
+        assert detector._ensure_initialized() is True, (
+            f"Saliency detector failed to initialize: {detector._init_error}"
+        )
+
+    @pytest.mark.skipif(not OPENCV_AVAILABLE, reason="OpenCV not installed")
     def test_detects_region_in_high_contrast_image(self, temp_dir):
-        """Should detect salient region in a high-contrast image."""
-        # Create image with a bright spot
+        """Should locate a real salient region in a high-contrast image."""
+        # Black image with a bright square at (80,80)-(120,120)
         img = Image.new('RGB', (200, 200), color=(0, 0, 0))
-        # Draw a bright rectangle
         for x in range(80, 120):
             for y in range(80, 120):
                 img.putpixel((x, y), (255, 255, 255))
 
         detector = SaliencyDetector()
+        if not detector._ensure_initialized():
+            pytest.fail(f"Saliency unavailable: {detector._init_error}")
+
         result = detector.detect_salient_region(img)
 
-        # Saliency detection may or may not find the region depending on
-        # OpenCV version and thresholding, so we just check it doesn't crash
-        assert result is None or isinstance(result, CropRegion)
+        assert isinstance(result, CropRegion), (
+            "Saliency returned no region for an unambiguous high-contrast target"
+        )
+        # The detected region must overlap the bright square, not sit elsewhere.
+        assert 70 <= result.center_x <= 130, f"center_x off target: {result.center_x}"
+        assert 70 <= result.center_y <= 130, f"center_y off target: {result.center_y}"
+        assert result.confidence > 0.0
 
     @pytest.mark.skipif(not OPENCV_AVAILABLE, reason="OpenCV not installed")
     def test_handles_uniform_image(self, sample_image):
@@ -636,3 +675,97 @@ class TestTileDatabaseIntegration:
         count = db.load_tiles_from_folder(temp_dir)
         assert count == 3
         assert db.size() == 3
+
+
+# ============================================================================
+# Real-photograph detection tests
+# ============================================================================
+#
+# Haar cascades are trained on photographs and do not fire on synthetic
+# shapes, so the only way to prove face detection actually works is to run it
+# against real images. These fixtures are large binaries and are not committed
+# to the repository; drop the two files in the project root to enable the
+# tests, otherwise they skip.
+
+FACE_PHOTO = os.path.join(os.path.dirname(__file__), 'face.jpg')
+NOFACE_PHOTO = os.path.join(os.path.dirname(__file__), 'noface.tif')
+
+requires_face_photo = pytest.mark.skipif(
+    not os.path.exists(FACE_PHOTO),
+    reason="face.jpg fixture not present in project root"
+)
+requires_noface_photo = pytest.mark.skipif(
+    not os.path.exists(NOFACE_PHOTO),
+    reason="noface.tif fixture not present in project root"
+)
+
+
+def _pipeline_image(path):
+    """Load an image and downscale it exactly as preprocess_image() does."""
+    img = Image.open(path)
+    if img.mode != 'RGB':
+        img = img.convert('RGB')
+    return TilePreprocessor(PreprocessorConfig())._rescale_if_needed(img)
+
+
+@pytest.mark.skipif(not OPENCV_AVAILABLE, reason="OpenCV not installed")
+class TestRealPhotoDetection:
+    """End-to-end detection against real photographs."""
+
+    @requires_face_photo
+    def test_finds_a_face_in_a_real_photo(self):
+        """The whole point of the feature: a real face must be detected."""
+        faces = FaceDetector().detect_faces(_pipeline_image(FACE_PHOTO))
+        assert len(faces) >= 1, "no face found in a photograph containing one"
+        assert all(isinstance(f, CropRegion) for f in faces)
+        assert all(f.width > 0 and f.height > 0 for f in faces)
+
+    @requires_noface_photo
+    def test_no_face_in_a_photo_without_one(self):
+        """Guards against a detector that fires indiscriminately."""
+        faces = FaceDetector().detect_faces(_pipeline_image(NOFACE_PHOTO))
+        assert faces == [], f"false positives on a face-free photo: {faces}"
+
+    @requires_face_photo
+    def test_face_shifts_the_crop_away_from_centre(self):
+        """A detected face must actually change where the tile is cropped.
+
+        If subject detection silently degraded (as it did when the base
+        opencv-python package was installed) the crop would be identical to
+        a plain centre crop and this test would fail.
+        """
+        pre = TilePreprocessor(PreprocessorConfig(target_width=100,
+                                                  target_height=100))
+        work = _pipeline_image(FACE_PHOTO)
+
+        region = pre._detect_region_of_interest(work)
+        assert region is not None
+
+        subject_crop = pre._crop_calculator.calculate_crop(work.size, region)
+        centre_crop = pre._crop_calculator.calculate_crop(work.size, None)
+        assert subject_crop != centre_crop, (
+            "subject-aware crop is identical to a centre crop"
+        )
+
+    @requires_face_photo
+    def test_detected_face_survives_into_the_crop(self):
+        """The cropped tile must still contain the face it was centred on."""
+        pre = TilePreprocessor(PreprocessorConfig(target_width=100,
+                                                  target_height=100))
+        work = _pipeline_image(FACE_PHOTO)
+
+        face = FaceDetector().detect_faces(work)[0]
+        left, top, right, bottom = pre._crop_calculator.calculate_crop(
+            work.size, pre._detect_region_of_interest(work)
+        )
+        assert left <= face.center_x <= right
+        assert top <= face.center_y <= bottom
+
+    @requires_face_photo
+    def test_preprocess_image_end_to_end(self):
+        """A real photo should come out at the configured aspect ratio."""
+        pre = TilePreprocessor(PreprocessorConfig(target_width=120,
+                                                  target_height=80))
+        result = pre.preprocess_image(FACE_PHOTO)
+        assert result.mode == 'RGB'
+        assert result.size[0] / result.size[1] == pytest.approx(1.5, abs=0.01)

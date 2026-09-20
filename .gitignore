@@ -28,3 +28,8 @@ Thumbs.db
 
 # Application specific
 *.pyc
+
+# Local test fixtures for real-photo detection tests (large binaries).
+# Drop face.jpg / noface.tif in the project root to enable those tests.
+face.jpg
+noface.tif
