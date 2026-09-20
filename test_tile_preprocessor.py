@@ -533,34 +533,53 @@ class TestTilePreprocessor:
         # Both should be valid images
         assert result1.size == result2.size
 
-    def test_combine_regions_single(self):
+    def test_select_region_single(self):
         """Single region should be returned unchanged."""
         config = PreprocessorConfig()
         preprocessor = TilePreprocessor(config)
 
         region = CropRegion(x=100, y=50, width=200, height=100, confidence=0.8)
-        combined = preprocessor._combine_regions([region])
+        selected = preprocessor._select_region([region])
 
-        assert combined.x == region.x
-        assert combined.y == region.y
-        assert combined.width == region.width
-        assert combined.height == region.height
+        assert selected is region
 
-    def test_combine_regions_multiple(self):
-        """Multiple regions should be combined into bounding box."""
-        config = PreprocessorConfig()
-        preprocessor = TilePreprocessor(config)
+    def test_select_region_picks_highest_confidence(self):
+        """The most confident candidate wins, regardless of position or size."""
+        preprocessor = TilePreprocessor(PreprocessorConfig())
+
+        weak_but_large = CropRegion(x=0, y=0, width=500, height=500,
+                                    confidence=1.9)
+        strong = CropRegion(x=300, y=300, width=120, height=120,
+                            confidence=8.2)
+        regions = [weak_but_large, strong,
+                   CropRegion(x=900, y=50, width=80, height=80, confidence=3.9)]
+
+        assert preprocessor._select_region(regions) is strong
+
+    def test_select_region_breaks_ties_on_area(self):
+        """With equal confidence (e.g. a detector with no real score) the
+        largest region wins, keeping the choice deterministic."""
+        preprocessor = TilePreprocessor(PreprocessorConfig())
+
+        small = CropRegion(x=0, y=0, width=44, height=44, confidence=1.0)
+        large = CropRegion(x=500, y=500, width=526, height=526, confidence=1.0)
+
+        assert preprocessor._select_region([small, large]) is large
+        assert preprocessor._select_region([large, small]) is large
+
+    def test_select_region_does_not_union(self):
+        """Regression: scattered candidates must not produce a region
+        spanning the gaps between them, which collapses to a centre crop."""
+        preprocessor = TilePreprocessor(PreprocessorConfig())
 
         regions = [
-            CropRegion(x=100, y=100, width=50, height=50),
-            CropRegion(x=200, y=150, width=50, height=50),
+            CropRegion(x=100, y=100, width=50, height=50, confidence=2.0),
+            CropRegion(x=3000, y=3000, width=50, height=50, confidence=5.0),
         ]
-        combined = preprocessor._combine_regions(regions)
+        selected = preprocessor._select_region(regions)
 
-        assert combined.x == 100  # Min x
-        assert combined.y == 100  # Min y
-        assert combined.width == 150  # From x=100 to x=250
-        assert combined.height == 100  # From y=100 to y=200
+        assert selected.width == 50 and selected.height == 50
+        assert (selected.x, selected.y) == (3000, 3000)
 
     def test_default_config_used_when_none_provided(self):
         """Should use default config when None provided."""
@@ -760,6 +779,50 @@ class TestRealPhotoDetection:
         )
         assert left <= face.center_x <= right
         assert top <= face.center_y <= bottom
+
+    @requires_face_photo
+    def test_false_positives_do_not_swamp_the_real_face(self):
+        """At full resolution the cascade returns the real face plus several
+        spurious matches. Selection must land on the real one.
+
+        Regression: unioning every candidate produced a region spanning 83%
+        of the frame, which is indistinguishable from a centre crop. The
+        default pipeline hides this by downscaling first, so this test
+        deliberately disables the rescale to exercise the multi-match path.
+        """
+        pre = TilePreprocessor(PreprocessorConfig(
+            target_width=100, target_height=100,
+            max_dimension_before_rescale=5000
+        ))
+        img = Image.open(FACE_PHOTO).convert('RGB')
+        work = pre._rescale_if_needed(img)
+
+        faces = pre._face_detector.detect_faces(work)
+        assert len(faces) > 1, "expected several candidates at full resolution"
+
+        roi = pre._select_region(faces)
+
+        # The chosen region must be one of the candidates, not a union.
+        assert any(roi.x == f.x and roi.y == f.y and roi.width == f.width
+                   for f in faces)
+        # It must be the most confident one.
+        assert roi.confidence == max(f.confidence for f in faces)
+        # And it must be a small part of the frame, not most of it.
+        coverage = (roi.width * roi.height) / (work.size[0] * work.size[1])
+        assert coverage < 0.25, f"selected region covers {coverage:.1%} of the frame"
+
+    @requires_face_photo
+    def test_face_confidences_are_not_all_equal(self):
+        """Haar levelWeights must reach CropRegion, otherwise every candidate
+        ties and highest-confidence selection degenerates to picking first."""
+        pre = TilePreprocessor(PreprocessorConfig(
+            max_dimension_before_rescale=5000))
+        work = pre._rescale_if_needed(Image.open(FACE_PHOTO).convert('RGB'))
+
+        confidences = [f.confidence for f in pre._face_detector.detect_faces(work)]
+        assert len(set(confidences)) > 1, (
+            f"all candidates share one confidence value: {confidences}"
+        )
 
     @requires_face_photo
     def test_preprocess_image_end_to_end(self):
