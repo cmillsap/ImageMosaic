@@ -75,8 +75,17 @@ class RenderConfig:
     # sit far from the colours the tile library actually covers.
     candidate_pool: int = 25
 
-    # Number of prepared tile bitmaps held in memory during compositing.
-    tile_cache_size: int = 512
+    # Memory budget for prepared tile bitmaps held during compositing.
+    # Expressed in megabytes rather than as a tile count because a count
+    # that is comfortable at 100x100 (3 MB) would be 49 GB at 2000x2000.
+    # A constrained render can touch many hundreds of distinct tiles, and
+    # a cache smaller than that thrashes, re-preparing tiles it just
+    # evicted, so the budget needs to cover a realistic working set.
+    tile_cache_mb: int = 256
+
+    # Explicit override for the number of cached bitmaps. Leave as None to
+    # derive it from tile_cache_mb and the tile size.
+    tile_cache_size: Optional[int] = None
 
     def __post_init__(self):
         if self.tile_width <= 0 or self.tile_height <= 0:
@@ -92,6 +101,17 @@ class RenderConfig:
             raise ValueError("max_tile_reuse cannot be negative")
         if self.min_reuse_distance < 0:
             raise ValueError("min_reuse_distance cannot be negative")
+        if self.tile_cache_mb <= 0:
+            raise ValueError("tile_cache_mb must be positive")
+        if self.tile_cache_size is not None and self.tile_cache_size < 1:
+            raise ValueError("tile_cache_size must be at least 1")
+
+    def resolved_tile_cache_size(self) -> int:
+        """How many tile bitmaps fit in the configured memory budget."""
+        if self.tile_cache_size is not None:
+            return self.tile_cache_size
+        bytes_per_tile = self.tile_width * self.tile_height * 3
+        return max(1, (self.tile_cache_mb * 1024 * 1024) // bytes_per_tile)
 
     @property
     def tile_size(self) -> Tuple[int, int]:
@@ -195,7 +215,7 @@ class MosaicRenderer:
         self.config = config or RenderConfig()
         self._preprocessor = preprocessor
         self._crop_calculator = CropCalculator(self.config.tile_aspect_ratio)
-        self._cache = _TileBitmapCache(self.config.tile_cache_size)
+        self._cache = _TileBitmapCache(self.config.resolved_tile_cache_size())
 
     # ------------------------------------------------------------------
     # Phase 1: planning

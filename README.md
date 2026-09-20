@@ -23,6 +23,7 @@ through it.
 | `tile_preprocessor.py` | Face/saliency-aware cropping to a uniform ratio |
 | `tile_database.py` | k-NN colour index over the tile library |
 | `guide_image.py` | Divides the guide image into analysed grid cells |
+| `tile_loader.py` | Parallel tile analysis across worker processes |
 | `mosaic_renderer.py` | Chooses a tile per cell, then composites |
 | `mosaic_worker.py` | Runs the pipeline off the GUI thread |
 | `mosaic_app.py` | PyQt6 user interface |
@@ -77,10 +78,44 @@ the log.
 
 ## Performance
 
-Analysing the tile library dominates runtime - roughly 70 ms per tile, so a
-10,000-image library takes about 11 minutes on first run. Preprocessed tiles
-are cached on disk between runs, so repeat renders over the same library are
-substantially faster.
+Analysing the tile library dominates runtime; everything else is minor by
+comparison. Measured on a real 8,229-photo library (28 GB, median 6.3 MP)
+on a 16-core machine:
+
+| | per photo | 8,229 photos |
+| --- | --- | --- |
+| Serial, no cache | 75 ms | 10.3 min |
+| Parallel, cold cache | 28 ms | 3.9 min |
+| Parallel, warm cache | 0.6 ms | 0.1 min |
+
+A full 20x30in poster at 300 DPI (5,400 tiles) from a 1,922-photo folder
+takes about 66 s cold: 52 s analysing tiles, 5 s on the guide, 1 s
+matching, 1 s compositing and 7 s saving the 6000x9000 PNG.
+
+Four things make that work:
+
+- **JPEG draft decoding.** `Image.draft()` has libjpeg decode at 1/2, 1/4
+  or 1/8 scale, so an 18 MP photo is never fully expanded just to be
+  shrunk to 1000 px.
+- **NumPy section averaging**, about 10x faster than summing pixel tuples.
+- **Tiles cached at final size.** Cache entries are the finished tile, not
+  the full-resolution crop, which is ~46x smaller (0.14 GB rather than
+  5.3 GB for this library) and lets the renderer paste straight from cache
+  - compositing drops from 32 s to under 1 s.
+- **Parallel analysis** across worker processes, about 3x.
+
+Two tempting changes that measurement ruled out: running face detection on
+a smaller image loses a third of the faces even with `minSize` scaled
+proportionally, and `cv2.setNumThreads(1)` makes a serial run 3x slower
+because OpenCV already parallelises Haar detection internally.
+
+### Formats
+
+Tiles are read through Pillow, which covers JPEG, PNG, TIFF, BMP, GIF and
+Canon `.cr2`. Camera RAW that Pillow cannot decode (`.crw`, `.cr3`) is
+skipped, as is `.dng`, which Pillow opens but returns only as a ~256 px
+embedded thumbnail. Adding `rawpy` would bring those in. Corrupt and
+truncated files are skipped with a warning rather than failing the run.
 
 ## Tests
 
@@ -101,5 +136,6 @@ gitignored and skip cleanly when absent.
 ## Possible enhancements
 
 - Expose the candidate pool size, which trades colour accuracy for variety
+- `rawpy` support for `.crw` / `.cr3` / full-resolution `.dng`
 - Preview the mosaic before saving
 - Alternative colour metrics (perceptual rather than RGB distance)

@@ -112,10 +112,44 @@ class TestRenderConfig:
         {"candidate_pool": 0},
         {"max_tile_reuse": -1},
         {"min_reuse_distance": -1},
+        {"tile_cache_mb": 0},
+        {"tile_cache_size": 0},
     ])
     def test_rejects_invalid_values(self, kwargs):
         with pytest.raises(ValueError):
             RenderConfig(**kwargs)
+
+
+class TestTileCacheSizing:
+    """The bitmap cache is budgeted in memory, not tile count: a count that
+    is fine at 100x100 would be tens of gigabytes at 2000x2000."""
+
+    def test_small_tiles_get_a_large_cache(self):
+        # 256 MB / (100*100*3) is about 8,900 tiles.
+        size = RenderConfig(100, 100).resolved_tile_cache_size()
+        assert size > 1000
+
+    def test_large_tiles_get_a_small_cache(self):
+        size = RenderConfig(2000, 2000).resolved_tile_cache_size()
+        assert size < 50
+
+    def test_budget_is_respected(self):
+        config = RenderConfig(100, 100, tile_cache_mb=8)
+        bytes_used = config.resolved_tile_cache_size() * 100 * 100 * 3
+        assert bytes_used <= 8 * 1024 * 1024
+
+    def test_explicit_override_wins(self):
+        assert RenderConfig(100, 100, tile_cache_size=7
+                            ).resolved_tile_cache_size() == 7
+
+    def test_never_zero(self):
+        assert RenderConfig(2000, 2000, tile_cache_mb=1
+                            ).resolved_tile_cache_size() >= 1
+
+    def test_renderer_uses_the_resolved_size(self, database):
+        config = RenderConfig(TILE_W, TILE_H, tile_cache_size=3)
+        renderer = MosaicRenderer(database, config)
+        assert renderer._cache._maxsize == 3
 
 
 # ============================================================================
@@ -373,8 +407,8 @@ class TestTilePreparation:
         path = database.get_tile_by_index(0).image_path
         assert renderer._get_tile_bitmap(path).size == (24, 12)
 
-    def test_preprocessor_output_is_resized(self, tile_folder, temp_dir):
-        """A preprocessor returns aspect-correct but arbitrarily sized images."""
+    def test_preprocessor_already_returns_tile_size(self, tile_folder, temp_dir):
+        """The preprocessor now resizes to the configured tile size itself."""
         config = PreprocessorConfig(target_width=TILE_W, target_height=TILE_H,
                                     enable_face_detection=False,
                                     enable_saliency=False)
@@ -386,8 +420,23 @@ class TestTilePreparation:
                                   preprocessor=preprocessor)
         path = db.get_tile_by_index(0).image_path
 
-        raw = preprocessor.preprocess_image(path)
-        assert raw.size != (TILE_W, TILE_H), "fixture no longer exercises resizing"
+        assert preprocessor.preprocess_image(path).size == (TILE_W, TILE_H)
+        assert renderer._get_tile_bitmap(path).size == (TILE_W, TILE_H)
+
+    def test_renderer_resizes_a_mismatched_preprocessor(self, tile_folder):
+        """The renderer must still guarantee the tile size it was asked for
+        even if handed a preprocessor configured for different dimensions."""
+        preprocessor = TilePreprocessor(PreprocessorConfig(
+            target_width=32, target_height=32,
+            enable_face_detection=False, enable_saliency=False))
+        db = TileDatabase(preprocessor=preprocessor)
+        db.load_tiles_from_folder(tile_folder)
+
+        renderer = MosaicRenderer(db, RenderConfig(TILE_W, TILE_H),
+                                  preprocessor=preprocessor)
+        path = db.get_tile_by_index(0).image_path
+
+        assert preprocessor.preprocess_image(path).size == (32, 32)
         assert renderer._get_tile_bitmap(path).size == (TILE_W, TILE_H)
 
     def test_missing_file_returns_none(self, renderer, temp_dir):

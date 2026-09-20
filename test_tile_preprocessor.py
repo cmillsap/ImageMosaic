@@ -533,6 +533,41 @@ class TestTilePreprocessor:
         # Both should be valid images
         assert result1.size == result2.size
 
+    def test_output_is_exactly_target_size(self, large_image):
+        """Cropping alone left tiles at an arbitrary resolution, so cache
+        entries were ~46x larger than needed (5.3 GB for a 10k library) and
+        every consumer had to resize again."""
+        preprocessor = TilePreprocessor(PreprocessorConfig(
+            target_width=64, target_height=48,
+            enable_face_detection=False, enable_saliency=False))
+        assert preprocessor.preprocess_image(large_image).size == (64, 48)
+
+    def test_cached_entry_is_stored_at_tile_size(self, temp_dir, large_image):
+        """What lands on disk must be the final tile, not the full crop."""
+        cache_dir = os.path.join(temp_dir, 'cache')
+        preprocessor = TilePreprocessor(PreprocessorConfig(
+            target_width=32, target_height=32, cache_dir=cache_dir,
+            enable_face_detection=False, enable_saliency=False))
+        preprocessor.preprocess_image(large_image)
+
+        entries = [f for f in os.listdir(cache_dir) if f.endswith('.png')]
+        assert len(entries) == 1
+        with Image.open(os.path.join(cache_dir, entries[0])) as cached:
+            assert cached.size == (32, 32)
+
+    def test_cached_and_fresh_results_are_identical(self, temp_dir, large_image):
+        """Resizing before both analysis and caching is what makes a tile's
+        colour signature the same on a cold and a warm run."""
+        cache_dir = os.path.join(temp_dir, 'cache')
+        config = dict(target_width=40, target_height=40, cache_dir=cache_dir,
+                      enable_face_detection=False, enable_saliency=False)
+
+        fresh = TilePreprocessor(PreprocessorConfig(**config)).preprocess_image(large_image)
+        warm = TilePreprocessor(PreprocessorConfig(**config)).preprocess_image(large_image)
+
+        assert fresh.size == warm.size == (40, 40)
+        assert list(fresh.getdata()) == list(warm.getdata())
+
     def test_select_region_single(self):
         """Single region should be returned unchanged."""
         config = PreprocessorConfig()

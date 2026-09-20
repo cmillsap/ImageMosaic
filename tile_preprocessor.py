@@ -449,8 +449,8 @@ class TilePreprocessor:
     """
     Main entry point for tile preprocessing.
 
-    Handles rescaling, subject detection (faces/saliency), and cropping
-    to produce uniformly sized tile images.
+    Handles rescaling, subject detection (faces/saliency), cropping and
+    resizing to produce tile images at exactly the configured size.
     """
 
     def __init__(self, config: Optional[PreprocessorConfig] = None):
@@ -475,7 +475,7 @@ class TilePreprocessor:
             image_path: Path to the source image
 
         Returns:
-            Preprocessed PIL Image cropped to target aspect ratio
+            Preprocessed PIL Image at exactly target_width x target_height
 
         Raises:
             FileNotFoundError: If image file doesn't exist
@@ -494,6 +494,14 @@ class TilePreprocessor:
         try:
             # Load and convert image
             with Image.open(image_path) as img:
+                # Ask the decoder for a reduced-scale image. For JPEG this
+                # makes libjpeg decode at 1/2, 1/4 or 1/8 scale in the DCT
+                # domain, which is far cheaper than decoding 18 megapixels
+                # only to throw most of them away below. It is a no-op for
+                # formats that cannot do it.
+                max_dim = self.config.max_dimension_before_rescale
+                img.draft('RGB', (max_dim, max_dim))
+
                 if img.mode != 'RGB':
                     img = img.convert('RGB')
 
@@ -508,6 +516,14 @@ class TilePreprocessor:
 
             # Apply crop
             result = self._apply_crop(working_img, region)
+
+            # Resize to the exact tile size. Doing this before both the
+            # colour analysis and the cache write means a tile's colour
+            # signature is identical whether it came from a fresh decode or
+            # from the cache, and keeps cache entries at tile size rather
+            # than storing the full-resolution crop.
+            if result.size != target_size:
+                result = result.resize(target_size, Image.LANCZOS)
 
             # Save to cache
             self._cache.save_to_cache(image_path, result, target_size)

@@ -77,6 +77,8 @@ class MosaicJob:
     max_tile_reuse: int = 0
     min_reuse_distance: int = 0
     cache_dir: Optional[str] = None
+    #: Worker processes for tile analysis; None picks a capped core count.
+    max_workers: Optional[int] = None
 
     def preprocessor_config(self) -> PreprocessorConfig:
         """Tile dimensions come from one place so cells and tiles agree."""
@@ -200,9 +202,11 @@ class MosaicWorker(QObject):
         # --- Load and analyse the tile library (the slow part) ----------
         self._report("Loading tiles...", 0, 1)
         database = TileDatabase(preprocessor=preprocessor)
-        loaded = database.load_tiles_from_folder(
+        loaded = database.load_tiles_parallel(
             job.tile_folder_path,
+            job.preprocessor_config(),
             recursive=job.scan_subdirectories,
+            max_workers=job.max_workers,
             progress_callback=self._callback("Loading tiles..."),
             should_cancel=self.is_cancelled,
         )
