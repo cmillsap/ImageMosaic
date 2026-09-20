@@ -30,6 +30,12 @@ logger = logging.getLogger(__name__)
 
 # Called as callback(completed, total, message).
 ProgressCallback = Callable[[int, int, str], None]
+# Polled during long loops; returning True aborts with RenderCancelled.
+CancelCheck = Callable[[], bool]
+
+
+class RenderCancelled(Exception):
+    """Raised when a caller's should_cancel check aborts a render."""
 
 
 @dataclass
@@ -196,7 +202,8 @@ class MosaicRenderer:
     # ------------------------------------------------------------------
 
     def plan(self, guide: GuideImage,
-             progress_callback: Optional[ProgressCallback] = None
+             progress_callback: Optional[ProgressCallback] = None,
+             should_cancel: Optional[CancelCheck] = None
              ) -> List[TilePlacement]:
         """
         Choose a tile for every cell of the guide grid.
@@ -208,12 +215,14 @@ class MosaicRenderer:
         Args:
             guide: The analysed guide image
             progress_callback: Called as (completed, total, message)
+            should_cancel: Polled periodically; aborts when it returns True
 
         Returns:
             One TilePlacement per grid cell, in row-major order
 
         Raises:
             RuntimeError: If the database has no tiles or no index
+            RenderCancelled: If should_cancel returns True
         """
         if self._database.size() == 0:
             raise RuntimeError("Cannot render: the tile database is empty")
@@ -245,6 +254,9 @@ class MosaicRenderer:
         usage: Dict[str, int] = {}
 
         for index, cell in enumerate(guide.iter_cells()):
+            if should_cancel is not None and index % 64 == 0 and should_cancel():
+                raise RenderCancelled("Cancelled while matching tiles")
+
             placement = self._choose_tile(cell, grid, usage)
             placements.append(placement)
             grid[cell.row][cell.col] = placement.image_path
@@ -320,7 +332,8 @@ class MosaicRenderer:
 
     def composite(self, placements: List[TilePlacement],
                   grid_dimensions: Tuple[int, int],
-                  progress_callback: Optional[ProgressCallback] = None
+                  progress_callback: Optional[ProgressCallback] = None,
+                  should_cancel: Optional[CancelCheck] = None
                   ) -> Image.Image:
         """
         Paste the planned tiles into a single image.
@@ -329,12 +342,14 @@ class MosaicRenderer:
             placements: Output of plan()
             grid_dimensions: (rows, cols) of the guide grid
             progress_callback: Called as (completed, total, message)
+            should_cancel: Polled periodically; aborts when it returns True
 
         Returns:
             The finished mosaic
 
         Raises:
             ValueError: If the canvas would have zero area
+            RenderCancelled: If should_cancel returns True
         """
         rows, cols = grid_dimensions
         tile_w, tile_h = self.config.tile_size
@@ -349,6 +364,9 @@ class MosaicRenderer:
         total = len(placements)
 
         for index, placement in enumerate(placements):
+            if should_cancel is not None and index % 64 == 0 and should_cancel():
+                raise RenderCancelled("Cancelled while assembling the mosaic")
+
             bitmap = self._get_tile_bitmap(placement.image_path)
             if bitmap is None:
                 continue  # Unreadable tile; leave the cell black.
@@ -400,12 +418,13 @@ class MosaicRenderer:
     # ------------------------------------------------------------------
 
     def render(self, guide: GuideImage,
-               progress_callback: Optional[ProgressCallback] = None
+               progress_callback: Optional[ProgressCallback] = None,
+               should_cancel: Optional[CancelCheck] = None
                ) -> Image.Image:
         """Plan and composite in one call."""
-        placements = self.plan(guide, progress_callback)
+        placements = self.plan(guide, progress_callback, should_cancel)
         return self.composite(placements, guide.grid_dimensions,
-                              progress_callback)
+                              progress_callback, should_cancel)
 
     @staticmethod
     def summarize(placements: List[TilePlacement]) -> RenderStats:

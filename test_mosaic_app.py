@@ -1,19 +1,18 @@
 """
-Tests for the MosaicApp UI's derived sizing logic.
-
-These cover the pure calculations behind the tile grid - the numbers that
-GuideImage and TilePreprocessor will both be driven from - rather than
-widget appearance.
+Tests for the MosaicApp UI: the derived sizing calculations behind the tile
+grid, and the wiring that runs a real render on a worker thread.
 """
 
 import os
 
 import pytest
+from PIL import Image
 
 # Qt needs an offscreen platform plugin under CI / headless runs.
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PyQt6.QtWidgets import QApplication
+from PyQt6.QtCore import QThread
+from PyQt6.QtWidgets import QApplication, QMessageBox
 
 from mosaic_app import MosaicApp
 from tile_preprocessor import PreprocessorConfig
@@ -200,4 +199,221 @@ class TestExistingControls:
         assert window.generate_btn.isEnabled() is True
 
     def test_progress_starts_hidden(self, window):
-        assert window.progress_group.isVisible() is False
+        assert window.progress_group.isHidden() is True
+
+
+# ============================================================================
+# The demo animation must be gone, not merely unused
+# ============================================================================
+
+def _app_source():
+    import mosaic_app
+    path = os.path.join(os.path.dirname(mosaic_app.__file__), 'mosaic_app.py')
+    with open(path, encoding='utf-8') as handle:
+        return handle.read()
+
+
+class TestDemoCodeRemoved:
+
+    @pytest.mark.parametrize("name", [
+        "demo_generate_mosaic", "_start_next_demo_task", "_demo_tick",
+    ])
+    def test_demo_methods_are_gone(self, window, name):
+        assert not hasattr(window, name)
+
+    def test_no_demo_code_remains(self):
+        assert 'demo' not in _app_source().lower()
+
+    def test_gui_thread_never_pumps_the_event_loop(self):
+        """processEvents() was how the demo faked responsiveness while
+        blocking the GUI thread. Real work runs on a worker now."""
+        assert 'processEvents' not in _app_source()
+
+
+# ============================================================================
+# Job snapshot
+# ============================================================================
+
+class TestJobSnapshot:
+
+    def _job(self, window, tmp):
+        window.guide_image_path = os.path.join(tmp, 'guide.png')
+        window.tile_folder_path = os.path.join(tmp, 'tiles')
+        configure(window, 20, 30, 120, 80)
+        return window.build_job(os.path.join(tmp, 'out.png'))
+
+    def test_captures_paths_and_dimensions(self, window, tmp_path):
+        job = self._job(window, str(tmp_path))
+        assert job.guide_image_path == window.guide_image_path
+        assert job.tile_folder_path == window.tile_folder_path
+        assert job.tile_width == 120
+        assert job.tile_height == 80
+        assert job.output_width_px == window.output_width_px
+        assert job.output_height_px == window.output_height_px
+        assert job.output_dpi == window.output_dpi
+
+    def test_captures_variety_settings(self, window, tmp_path):
+        window.max_reuse_spinbox.setValue(6)
+        window.min_distance_spinbox.setValue(3)
+        job = self._job(window, str(tmp_path))
+        assert job.max_tile_reuse == 6
+        assert job.min_reuse_distance == 3
+
+    def test_captures_subdirectory_flag(self, window, tmp_path):
+        window.subdirs_checkbox.setChecked(True)
+        job = self._job(window, str(tmp_path))
+        assert job.scan_subdirectories is True
+
+    def test_is_a_snapshot_not_a_live_view(self, window, tmp_path):
+        """The worker must not read a control the user is still editing."""
+        job = self._job(window, str(tmp_path))
+        window.tile_width_spinbox.setValue(40)
+        assert job.tile_width == 120
+
+    def test_cache_dir_is_set(self, window, tmp_path):
+        """Tiles get prepared twice - indexed, then pasted - so the
+        on-disk cache is what stops the second pass repeating the work."""
+        assert self._job(window, str(tmp_path)).cache_dir
+
+
+# ============================================================================
+# Guards before a run starts
+# ============================================================================
+
+class TestGenerateGuards:
+
+    def test_refuses_when_no_tiles_fit(self, window, monkeypatch):
+        configure(window, 1, 1, 400, 400)   # 300x300 canvas, 400px tile
+        assert window.total_tiles == 0
+
+        warned = []
+        monkeypatch.setattr(QMessageBox, 'warning',
+                            lambda *a, **k: warned.append(a))
+        monkeypatch.setattr(window, 'choose_output_path',
+                            lambda: pytest.fail("reached the save dialog"))
+
+        window.generate_mosaic()
+        assert warned
+        assert window.worker_thread is None
+
+    def test_cancelling_the_save_dialog_starts_nothing(self, window, monkeypatch):
+        configure(window, 20, 30, 100, 100)
+        monkeypatch.setattr(window, 'choose_output_path', lambda: None)
+
+        window.generate_mosaic()
+        assert window.worker is None
+        assert window.worker_thread is None
+
+    def test_will_not_start_a_second_run(self, window, monkeypatch):
+        window.worker_thread = object()          # pretend one is running
+        monkeypatch.setattr(window, 'choose_output_path',
+                            lambda: pytest.fail("started a second run"))
+        window.generate_mosaic()
+        window.worker_thread = None              # tidy up for teardown
+
+
+# ============================================================================
+# Progress display
+# ============================================================================
+
+class TestProgressUi:
+
+    def test_show_progress_reveals_cancel(self, window):
+        window.show_progress()
+        assert window.cancel_btn.isHidden() is False
+        assert window.generate_btn.isEnabled() is False
+
+    def test_hide_progress_restores_idle_state(self, window):
+        window.show_progress()
+        window.hide_progress()
+        assert window.progress_group.isHidden() is True
+        assert window.cancel_btn.isHidden() is True
+        assert window.progress_status_label.text() == "Ready"
+
+    def test_stage_progress_shows_counts(self, window):
+        window.on_stage_progress("Loading tiles...", 5, 1000)
+        text = window.progress_status_label.text()
+        assert "Loading tiles..." in text
+        assert "1,000" in text
+
+    def test_single_step_stage_omits_counts(self, window):
+        window.on_stage_progress("Saving...", 1, 1)
+        assert window.progress_status_label.text() == "Saving..."
+
+    def test_progress_value_is_clamped(self, window):
+        window.set_progress_value(500)
+        assert window.progress_bar.value() == 100
+        window.set_progress_value(-20)
+        assert window.progress_bar.value() == 0
+
+
+# ============================================================================
+# Worker lifecycle, driving a real thread
+# ============================================================================
+
+class TestWorkerLifecycle:
+
+    def _start(self, window, monkeypatch, tmp):
+        tiles = os.path.join(tmp, 'tiles')
+        os.makedirs(tiles, exist_ok=True)
+        for i, color in enumerate([(255, 0, 0), (0, 0, 255), (0, 255, 0)]):
+            Image.new('RGB', (20, 20), color).save(
+                os.path.join(tiles, f't{i}.png'))
+
+        guide = os.path.join(tmp, 'guide.png')
+        Image.new('RGB', (40, 40), (255, 0, 0)).save(guide)
+
+        window.guide_image_path = guide
+        window.tile_folder_path = tiles
+        configure(window, 1, 1, 100, 100)     # 300x300 canvas -> 3x3 grid
+
+        output = os.path.join(tmp, 'out.png')
+        monkeypatch.setattr(window, 'choose_output_path', lambda: output)
+        monkeypatch.setattr(QMessageBox, 'information', lambda *a, **k: None)
+        monkeypatch.setattr(QMessageBox, 'critical', lambda *a, **k: None)
+
+        window.generate_mosaic()
+        return output
+
+    def _drain(self, window, qapp):
+        while window.worker_thread is not None:
+            qapp.processEvents()
+
+    def test_render_runs_off_the_gui_thread(self, window, monkeypatch, qapp, tmp_path):
+        output = self._start(window, monkeypatch, str(tmp_path))
+
+        assert isinstance(window.worker_thread, QThread)
+        assert window.worker.thread() is window.worker_thread
+        assert window.worker.thread() is not QThread.currentThread()
+
+        self._drain(window, qapp)
+        assert os.path.exists(output)
+
+    def test_teardown_clears_both_objects(self, window, monkeypatch, qapp, tmp_path):
+        self._start(window, monkeypatch, str(tmp_path))
+        self._drain(window, qapp)
+
+        assert window.worker is None
+        assert window.worker_thread is None
+
+    def test_ui_returns_to_idle_after_success(self, window, monkeypatch, qapp, tmp_path):
+        self._start(window, monkeypatch, str(tmp_path))
+        self._drain(window, qapp)
+
+        assert window.progress_group.isHidden() is True
+        assert window.generate_btn.isEnabled() is True
+
+    def test_cancel_button_stops_the_run(self, window, monkeypatch, qapp, tmp_path):
+        self._start(window, monkeypatch, str(tmp_path))
+        window.cancel_btn.click()
+        self._drain(window, qapp)
+
+        assert window.worker is None
+        assert window.generate_btn.isEnabled() is True
+
+    def test_closing_the_window_stops_the_worker(self, window, monkeypatch, qapp, tmp_path):
+        self._start(window, monkeypatch, str(tmp_path))
+        window.close()
+
+        assert window.worker is None
+        assert window.worker_thread is None

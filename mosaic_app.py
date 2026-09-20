@@ -1,11 +1,15 @@
+import os
 import sys
+import tempfile
+
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                               QHBoxLayout, QPushButton, QLabel, QLineEdit,
                               QFileDialog, QGroupBox, QSizePolicy, QSpinBox,
-                              QCheckBox, QProgressBar)
-from PyQt6.QtCore import Qt, QTimer
+                              QCheckBox, QProgressBar, QMessageBox)
+from PyQt6.QtCore import Qt, QThread
 from PyQt6.QtGui import QPixmap
 
+from mosaic_worker import MosaicJob, MosaicWorker
 from tile_preprocessor import PreprocessorConfig
 
 
@@ -20,6 +24,9 @@ class MosaicApp(QMainWindow):
         self.output_height_inches = 30
         self.tile_width = 100
         self.tile_height = 100
+        # Set while a render is in flight; both are None when idle.
+        self.worker = None
+        self.worker_thread = None
         self.init_ui()
 
     def init_ui(self):
@@ -111,8 +118,36 @@ class MosaicApp(QMainWindow):
         # Aspect ratio readout - tiles are cropped to this ratio by the
         # preprocessor, so it is also the shape of every guide grid cell.
         self.tile_aspect_label = QLabel()
-        self.tile_aspect_label.setStyleSheet("QLabel { color: #555; }")
+        self.tile_aspect_label.setEnabled(False)  # palette-aware secondary text
         tile_settings_layout.addWidget(self.tile_aspect_label)
+
+        # Variety controls. Without these a plain nearest-neighbour match
+        # reuses one photo across every flat area of the guide.
+        variety_layout = QHBoxLayout()
+
+        variety_layout.addWidget(QLabel("Max uses per image:"))
+        self.max_reuse_spinbox = QSpinBox()
+        self.max_reuse_spinbox.setRange(0, 9999)
+        self.max_reuse_spinbox.setValue(0)
+        self.max_reuse_spinbox.setSpecialValueText("unlimited")
+        self.max_reuse_spinbox.setToolTip(
+            "Cap how many times one image may appear. 0 means no limit.\n"
+            "Best effort: if no alternative fits, the least-used image wins."
+        )
+        variety_layout.addWidget(self.max_reuse_spinbox)
+
+        variety_layout.addWidget(QLabel("Min gap between repeats:"))
+        self.min_distance_spinbox = QSpinBox()
+        self.min_distance_spinbox.setRange(0, 50)
+        self.min_distance_spinbox.setValue(0)
+        self.min_distance_spinbox.setSpecialValueText("none")
+        self.min_distance_spinbox.setToolTip(
+            "Keep repeats of the same image at least this many cells apart."
+        )
+        variety_layout.addWidget(self.min_distance_spinbox)
+
+        variety_layout.addStretch()
+        tile_settings_layout.addLayout(variety_layout)
 
         tile_settings_group.setLayout(tile_settings_layout)
         main_layout.addWidget(tile_settings_group)
@@ -147,7 +182,7 @@ class MosaicApp(QMainWindow):
 
         # Derived tile grid readout
         self.grid_info_label = QLabel()
-        self.grid_info_label.setStyleSheet("QLabel { color: #555; }")
+        self.grid_info_label.setEnabled(False)  # palette-aware secondary text
         output_settings_layout.addWidget(self.grid_info_label)
 
         # All labels exist now, so it is safe to populate them.
@@ -156,7 +191,7 @@ class MosaicApp(QMainWindow):
         output_settings_group.setLayout(output_settings_layout)
         main_layout.addWidget(output_settings_group)
 
-        # Generate Mosaic Section (placeholder for future functionality)
+        # Generate Mosaic Section
         generate_layout = QHBoxLayout()
         generate_layout.addStretch()
 
@@ -170,8 +205,16 @@ class MosaicApp(QMainWindow):
                 font-weight: bold;
             }
         """)
-        self.generate_btn.clicked.connect(self.demo_generate_mosaic)
+        self.generate_btn.clicked.connect(self.generate_mosaic)
         generate_layout.addWidget(self.generate_btn)
+
+        self.cancel_btn = QPushButton("Cancel")
+        self.cancel_btn.setMinimumWidth(100)
+        self.cancel_btn.setStyleSheet("QPushButton { padding: 10px; }")
+        self.cancel_btn.clicked.connect(self.cancel_mosaic)
+        self.cancel_btn.setVisible(False)
+        generate_layout.addWidget(self.cancel_btn)
+
         generate_layout.addStretch()
 
         main_layout.addLayout(generate_layout)
@@ -186,7 +229,6 @@ class MosaicApp(QMainWindow):
         self.progress_status_label.setStyleSheet("""
             QLabel {
                 font-size: 12px;
-                color: #555;
                 padding: 5px;
             }
         """)
@@ -274,7 +316,8 @@ class MosaicApp(QMainWindow):
             self.grid_info_label.setText(
                 "\u26a0 Tile is larger than the output canvas - no tiles fit."
             )
-            self.grid_info_label.setStyleSheet("QLabel { color: #c0392b; }")
+            self.grid_info_label.setEnabled(True)
+            self.grid_info_label.setStyleSheet("QLabel { color: #e74c3c; }")
             return
 
         rem_x, rem_y = self.remainder_px
@@ -282,7 +325,8 @@ class MosaicApp(QMainWindow):
         if rem_x or rem_y:
             text += f"  \u00b7  {rem_x} \u00d7 {rem_y} px unused at edges"
         self.grid_info_label.setText(text)
-        self.grid_info_label.setStyleSheet("QLabel { color: #555; }")
+        self.grid_info_label.setStyleSheet("")
+        self.grid_info_label.setEnabled(False)
 
     @property
     def output_width_px(self):
@@ -362,120 +406,162 @@ class MosaicApp(QMainWindow):
         self.progress_bar.setValue(0)
         self.progress_status_label.setText("Starting...")
         self.generate_btn.setEnabled(False)
+        self.cancel_btn.setEnabled(True)
+        self.cancel_btn.setVisible(True)
 
     def hide_progress(self):
         """Hide the progress section and reset to ready state."""
         self.progress_group.setVisible(False)
         self.progress_bar.setValue(0)
         self.progress_status_label.setText("Ready")
+        self.cancel_btn.setVisible(False)
         self.check_ready_to_generate()
 
     def set_progress_status(self, status: str):
-        """
-        Set the current task status text.
-
-        Args:
-            status: Description of the current task (e.g., "Loading tiles...",
-                   "Analyzing guide image...", "Generating mosaic...")
-        """
+        """Set the current task status text."""
         self.progress_status_label.setText(status)
-        # Process events to update UI immediately
-        QApplication.processEvents()
 
     def set_progress_value(self, value: int):
-        """
-        Set the progress bar value.
-
-        Args:
-            value: Progress percentage (0-100)
-        """
+        """Set the progress bar value (0-100)."""
         self.progress_bar.setValue(max(0, min(100, value)))
-        # Process events to update UI immediately
-        QApplication.processEvents()
 
     def set_progress(self, status: str, value: int):
-        """
-        Set both status text and progress value at once.
+        """Set both status text and progress value at once."""
+        self.set_progress_status(status)
+        self.set_progress_value(value)
 
-        Args:
-            status: Description of the current task
-            value: Progress percentage (0-100)
-        """
-        self.progress_status_label.setText(status)
-        self.progress_bar.setValue(max(0, min(100, value)))
-        # Process events to update UI immediately
-        QApplication.processEvents()
+    # Mosaic Generation
 
-    def start_task(self, task_name: str):
-        """
-        Start a new subtask, resetting progress to 0.
+    def build_job(self, output_path: str) -> MosaicJob:
+        """Snapshot the current settings into a job for the worker.
 
-        Args:
-            task_name: Name of the task to display (e.g., "Loading tiles...")
+        Read on the GUI thread before the worker starts, so the worker never
+        reads a control the user might still be editing.
         """
-        self.progress_status_label.setText(task_name)
-        self.progress_bar.setValue(0)
-        QApplication.processEvents()
+        return MosaicJob(
+            guide_image_path=self.guide_image_path,
+            tile_folder_path=self.tile_folder_path,
+            output_path=output_path,
+            tile_width=self.tile_width,
+            tile_height=self.tile_height,
+            output_width_px=self.output_width_px,
+            output_height_px=self.output_height_px,
+            output_dpi=self.output_dpi,
+            scan_subdirectories=self.scan_subdirectories,
+            max_tile_reuse=self.max_reuse_spinbox.value(),
+            min_reuse_distance=self.min_distance_spinbox.value(),
+            cache_dir=self.tile_cache_dir(),
+        )
 
-    def complete_task(self):
-        """Mark the current task as complete (sets progress to 100%)."""
-        self.progress_bar.setValue(100)
-        QApplication.processEvents()
+    def tile_cache_dir(self) -> str:
+        """Where preprocessed tiles are cached between runs.
 
-    # Demo/Test Methods (remove when real generation is implemented)
-
-    def demo_generate_mosaic(self):
+        Tiles are prepared twice - once to index their colours and again to
+        paste their pixels - so an on-disk cache roughly halves the work and
+        makes a second run over the same library far faster.
         """
-        Demo method to test the progress UI.
-        Simulates the mosaic generation process with fake progress.
-        Remove this method when real generation is implemented.
-        """
+        return os.path.join(tempfile.gettempdir(), "image_mosaic_tile_cache")
+
+    def choose_output_path(self):
+        """Ask where to save. Returns None if the user cancels."""
+        suggested = "mosaic.png"
+        if self.guide_image_path:
+            stem = os.path.splitext(os.path.basename(self.guide_image_path))[0]
+            suggested = f"{stem}_mosaic.png"
+
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save Mosaic As",
+            suggested,
+            "PNG Image (*.png);;JPEG Image (*.jpg);;TIFF Image (*.tif)"
+        )
+        return path or None
+
+    def generate_mosaic(self):
+        """Validate, pick an output path, and start the worker thread."""
+        if self.worker_thread is not None:
+            return  # Already running.
+
+        if self.total_tiles == 0:
+            QMessageBox.warning(
+                self, "Nothing to generate",
+                "The tile is larger than the output canvas, so no tiles fit. "
+                "Reduce the tile size or increase the output dimensions."
+            )
+            return
+
+        output_path = self.choose_output_path()
+        if not output_path:
+            return
+
+        job = self.build_job(output_path)
+
+        self.worker = MosaicWorker(job)
+        self.worker_thread = QThread(self)
+        self.worker.moveToThread(self.worker_thread)
+
+        self.worker_thread.started.connect(self.worker.run)
+        self.worker.stage_progress.connect(self.on_stage_progress)
+        self.worker.overall_progress.connect(self.set_progress_value)
+        self.worker.finished.connect(self.on_render_finished)
+        self.worker.failed.connect(self.on_render_failed)
+        self.worker.cancelled.connect(self.on_render_cancelled)
+
         self.show_progress()
+        self.worker_thread.start()
 
-        # Define demo tasks with their simulated step counts
-        self._demo_tasks = [
-            ("Loading tiles...", 25),
-            ("Preprocessing tiles...", 20),
-            ("Analyzing guide image...", 10),
-            ("Building tile database...", 15),
-            ("Matching tiles to guide...", 40),
-            ("Assembling mosaic...", 30),
-            ("Saving output...", 5),
-        ]
-        self._demo_task_index = 0
-        self._demo_step = 0
-        self._demo_steps_for_task = 0
+    def cancel_mosaic(self):
+        """Ask the running worker to stop at its next checkpoint."""
+        if self.worker is not None:
+            self.cancel_btn.setEnabled(False)
+            self.set_progress_status("Cancelling...")
+            self.worker.cancel()
 
-        # Start the demo with a timer
-        self._demo_timer = QTimer()
-        self._demo_timer.timeout.connect(self._demo_tick)
-        self._start_next_demo_task()
-        self._demo_timer.start(50)  # 50ms per tick for smooth animation
-
-    def _start_next_demo_task(self):
-        """Start the next demo task."""
-        if self._demo_task_index < len(self._demo_tasks):
-            task_name, steps = self._demo_tasks[self._demo_task_index]
-            self._demo_steps_for_task = steps
-            self._demo_step = 0
-            self.start_task(task_name)
+    def on_stage_progress(self, stage: str, completed: int, total: int):
+        """Show which stage is running and how far through it is."""
+        if total > 1:
+            self.set_progress_status(f"{stage}  ({completed:,} of {total:,})")
         else:
-            # All tasks complete
-            self._demo_timer.stop()
-            self.set_progress("Complete!", 100)
-            # Hide progress after a short delay
-            QTimer.singleShot(1500, self.hide_progress)
+            self.set_progress_status(stage)
 
-    def _demo_tick(self):
-        """Process one tick of the demo animation."""
-        self._demo_step += 1
-        progress = int((self._demo_step / self._demo_steps_for_task) * 100)
-        self.set_progress_value(progress)
+    def on_render_finished(self, output_path: str, stats):
+        self._teardown_worker()
+        self.hide_progress()
+        QMessageBox.information(
+            self, "Mosaic complete",
+            f"Saved to:\n{output_path}\n\n"
+            f"{stats.total_cells:,} tiles placed, "
+            f"{stats.distinct_tiles:,} distinct images used.\n"
+            f"Most-used image appears {stats.max_tile_uses:,} times."
+        )
 
-        if self._demo_step >= self._demo_steps_for_task:
-            # Move to next task
-            self._demo_task_index += 1
-            self._start_next_demo_task()
+    def on_render_failed(self, message: str):
+        self._teardown_worker()
+        self.hide_progress()
+        QMessageBox.critical(self, "Mosaic failed", message)
+
+    def on_render_cancelled(self):
+        self._teardown_worker()
+        self.hide_progress()
+        self.set_progress_status("Ready")
+
+    def _teardown_worker(self):
+        """Stop the thread and drop both objects."""
+        if self.worker_thread is not None:
+            self.worker_thread.quit()
+            self.worker_thread.wait()
+            self.worker_thread.deleteLater()
+            self.worker_thread = None
+        if self.worker is not None:
+            self.worker.deleteLater()
+            self.worker = None
+
+    def closeEvent(self, event):
+        """Never leave a worker thread running after the window closes."""
+        if self.worker is not None:
+            self.worker.cancel()
+        self._teardown_worker()
+        super().closeEvent(event)
 
 
 def main():
