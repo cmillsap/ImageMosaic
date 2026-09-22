@@ -1,3 +1,4 @@
+import multiprocessing
 import os
 import sys
 import tempfile
@@ -565,6 +566,11 @@ class MosaicApp(QMainWindow):
 
 
 def main():
+    # Frozen builds re-execute this file to start each tile-analysis worker
+    # process. Without freeze_support() every worker would spawn its own
+    # window instead of doing the work.
+    multiprocessing.freeze_support()
+
     app = QApplication(sys.argv)
     window = MosaicApp()
     window.show()

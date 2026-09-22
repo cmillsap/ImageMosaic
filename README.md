@@ -30,6 +30,19 @@ through it.
 
 ## Installation
 
+### Windows installer
+
+Run `ImageMosaic-1.0.0-Setup.exe` and follow the prompts. Python is not
+required - the installer carries its own. It installs per-user by default,
+so there is no UAC prompt; choose *Install for all users* on the first page
+to put it in `Program Files` instead. The app then appears in the Start
+Menu, and uninstalls from Settings > Apps like anything else.
+
+The installer is not code-signed, so SmartScreen shows "Windows protected
+your PC" on first run. *More info* > *Run anyway* gets past it.
+
+### From source
+
 Requires Python 3.8 or higher.
 
 ```bash
@@ -116,6 +129,43 @@ Canon `.cr2`. Camera RAW that Pillow cannot decode (`.crw`, `.cr3`) is
 skipped, as is `.dng`, which Pillow opens but returns only as a ~256 px
 embedded thumbnail. Adding `rawpy` would bring those in. Corrupt and
 truncated files are skipped with a warning rather than failing the run.
+
+## Building the installer
+
+```powershell
+powershell -ExecutionPolicy Bypass -File packaging\build.ps1
+```
+
+Two stages, both driven by that script: PyInstaller freezes the app into
+`dist\ImageMosaic`, then Inno Setup packs that folder into
+`dist\ImageMosaic-1.0.0-Setup.exe`. PyInstaller is installed into the venv
+on demand; Inno Setup 6 must already be present, via
+`winget install JRSoftware.InnoSetup`. Pass `-SkipApp` to recompile only
+the installer when the frozen app is already built.
+
+| File | Purpose |
+| --- | --- |
+| `packaging/build.ps1` | Runs both stages |
+| `packaging/ImageMosaic.spec` | PyInstaller configuration |
+| `packaging/installer.iss` | Inno Setup configuration |
+| `packaging/make_icon.py` | Regenerates `icon.ico`; committed, rarely needed |
+
+The frozen build is ~354 MB, which solid LZMA2 compresses to an ~85 MB
+setup. Three things in it are load-bearing:
+
+- **`multiprocessing.freeze_support()` in `main()`.** Tile analysis spawns
+  worker processes, and a frozen worker re-executes the exe. Without it
+  each worker opens its own window instead of analysing tiles.
+- **The Haar cascades are collected explicitly.** `FaceDetector` reads
+  `cv2.data.haarcascades` at runtime and the stock OpenCV hook does not
+  reliably carry those XML files across. Miss them and every crop quietly
+  falls back to centre.
+- **One folder, not one file.** A one-file build unpacks all 354 MB to temp
+  on every launch, and each worker process pays that again.
+
+To change the version, edit `AppVersion` in `packaging/installer.iss`.
+Leave `AppId` alone - it is how Windows recognises an installed copy and
+upgrades it in place rather than installing a second one.
 
 ## Tests
 
