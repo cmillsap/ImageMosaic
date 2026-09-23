@@ -19,6 +19,7 @@ through it.
 
 | Module | Responsibility |
 | --- | --- |
+| `image_io.py` | Opens every format, including HEIC and DNG |
 | `tile_analyzer.py` | Splits an image into 9 sections and averages each |
 | `tile_preprocessor.py` | Face/saliency-aware cropping to a uniform ratio |
 | `tile_database.py` | k-NN colour index over the tile library |
@@ -124,11 +125,26 @@ because OpenCV already parallelises Haar detection internally.
 
 ### Formats
 
-Tiles are read through Pillow, which covers JPEG, PNG, TIFF, BMP, GIF and
-Canon `.cr2`. Camera RAW that Pillow cannot decode (`.crw`, `.cr3`) is
-skipped, as is `.dng`, which Pillow opens but returns only as a ~256 px
-embedded thumbnail. Adding `rawpy` would bring those in. Corrupt and
-truncated files are skipped with a warning rather than failing the run.
+Every image, tile or guide, is opened through `image_io.open_image()`.
+Pillow covers JPEG, PNG, TIFF, BMP, GIF and Canon `.cr2`; `pillow-heif`
+adds iPhone HEIC/HEIF; and `.dng` is developed by `rawpy` (LibRaw), since
+Pillow only returns its ~160 px embedded thumbnail. Other camera RAW
+(`.crw`, `.cr3`, ...) is skipped: rawpy could read it, but it is untested.
+Corrupt and truncated files are skipped with a warning rather than failing
+the run.
+
+These formats cost more than JPEG, which gets libjpeg's reduced-scale
+decode for free. Measured per tile (serial, no cache):
+
+| Format | per photo |
+| --- | --- |
+| JPEG, 14 MP | 120 ms |
+| HEIC, 12 MP | 215 ms |
+| DNG, 12 MP linear | 310 ms |
+
+DNGs are developed at half size (skipping demosaicing), which is still
+far above tile resolution. Most of their cost is LibRaw reading the ~20 MB
+file, not the development itself.
 
 ## Building the installer
 
@@ -175,13 +191,15 @@ python -m pytest
 
 Some detection tests need real photographs, since Haar cascades do not
 respond to synthetic shapes. Place `face.jpg` (containing a face) and
-`noface.tif` (containing none) in the project root to enable them; they are
+`noface.tif` (containing none) in the project root to enable them. The
+format tests likewise need a `test.HEIC` and a `test.DNG`. All four are
 gitignored and skip cleanly when absent.
 
 ## Requirements
 
 - Python 3.8+
-- PyQt6, Pillow, NumPy, scikit-learn, opencv-contrib-python
+- PyQt6, Pillow, pillow-heif, rawpy, NumPy, scikit-learn,
+  opencv-contrib-python
 
 ## Possible enhancements
 

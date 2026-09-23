@@ -14,6 +14,8 @@ from typing import List, Optional, Tuple
 
 from PIL import Image
 
+from image_io import open_image
+
 # Optional OpenCV import for face/saliency detection
 try:
     import cv2
@@ -493,7 +495,7 @@ class TilePreprocessor:
 
         try:
             # Load and convert image
-            with Image.open(image_path) as img:
+            with open_image(image_path) as img:
                 # Ask the decoder for a reduced-scale image. For JPEG this
                 # makes libjpeg decode at 1/2, 1/4 or 1/8 scale in the DCT
                 # domain, which is far cheaper than decoding 18 megapixels

@@ -19,15 +19,15 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Formats Pillow can decode without an extra dependency.
+# Formats image_io.open_image can decode.
 #
-# .tif and .cr2 are included because Pillow reads both directly - a Canon
-# .cr2 comes back at full resolution. Camera RAW formats Pillow cannot open
-# at all (.crw, .cr3) are deliberately absent; reading those would need
-# rawpy. .dng is also absent: Pillow opens it but returns only the embedded
-# ~256px thumbnail, which is too small for face detection to work on.
+# .tif and .cr2 are read by Pillow directly - a Canon .cr2 comes back at
+# full resolution. .heic/.heif come through the pillow-heif plugin and .dng
+# through rawpy; see image_io. Other camera RAW formats (.crw, .cr3, ...)
+# are absent: rawpy could read them, but none has been tested.
 DEFAULT_IMAGE_EXTENSIONS = (
     '.png', '.jpg', '.jpeg', '.bmp', '.gif', '.tif', '.tiff', '.cr2',
+    '.heic', '.heif', '.dng',
 )
 
 
@@ -235,7 +235,7 @@ class TileDatabase:
             folder_path: Folder containing tile images
             config: PreprocessorConfig for the workers to build from
             extensions: File extensions to include; defaults to the
-                       formats Pillow can read
+                       formats open_image can read
             recursive: Also scan subdirectories
             max_workers: Process count; defaults to a capped core count
             auto_build_index: Build the search index after loading

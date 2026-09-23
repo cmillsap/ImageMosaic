@@ -200,13 +200,12 @@ class TestDefaultExtensions:
         assert '.cr2' in DEFAULT_IMAGE_EXTENSIONS
 
     @pytest.mark.parametrize("ext", ['.crw', '.cr3', '.psd'])
-    def test_excludes_formats_pillow_cannot_read(self, ext):
+    def test_excludes_untested_formats(self, ext):
         assert ext not in DEFAULT_IMAGE_EXTENSIONS
 
-    def test_excludes_dng(self):
-        """Pillow opens .dng but returns only a ~256px embedded thumbnail,
-        which is too small for face detection to be meaningful."""
-        assert '.dng' not in DEFAULT_IMAGE_EXTENSIONS
+    @pytest.mark.parametrize("ext", ['.heic', '.heif', '.dng'])
+    def test_includes_formats_image_io_decodes(self, ext):
+        assert ext in DEFAULT_IMAGE_EXTENSIONS
 
     def test_tiff_files_are_discovered(self, temp_dir):
         folder = os.path.join(temp_dir, 'mixed')

@@ -267,7 +267,8 @@ class MosaicApp(QMainWindow):
             self,
             "Select Guide Image",
             "",
-            "Image Files (*.png *.jpg *.jpeg *.bmp *.gif);;All Files (*)"
+            "Image Files (*.png *.jpg *.jpeg *.bmp *.gif *.tif *.tiff "
+            "*.heic *.heif *.dng);;All Files (*)"
         )
 
         if file_path:

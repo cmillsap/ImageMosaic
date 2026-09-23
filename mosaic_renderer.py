@@ -22,6 +22,7 @@ from typing import Callable, Dict, List, Optional, Tuple
 from PIL import Image
 
 from guide_image import GuideImage
+from image_io import open_image
 from tile_analyzer import TileData
 from tile_database import TileDatabase
 from tile_preprocessor import CropCalculator, TilePreprocessor
@@ -420,7 +421,7 @@ class MosaicRenderer:
             # resize, so its output is aspect-correct at an arbitrary size.
             image = self._preprocessor.preprocess_image(image_path)
         else:
-            image = Image.open(image_path)
+            image = open_image(image_path)
             if image.mode != 'RGB':
                 image = image.convert('RGB')
             image = image.crop(

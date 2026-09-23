@@ -11,6 +11,7 @@ from typing import List, Tuple, Iterator
 from PIL import Image
 import os
 
+from image_io import open_image
 from tile_analyzer import BoundingBox, ColorAverage, SectionData, ImageTileAnalyzer
 
 
@@ -82,7 +83,7 @@ class GuideImage:
 
     def _load_and_resize(self, image_path: str) -> Image.Image:
         """Open the guide image, convert to RGB, and resize to the grid area."""
-        img = Image.open(image_path)
+        img = open_image(image_path)
         if img.mode != 'RGB':
             img = img.convert('RGB')
         img = img.resize((self._used_width, self._used_height), Image.LANCZOS)

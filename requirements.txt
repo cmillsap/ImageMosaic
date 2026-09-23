@@ -1,5 +1,10 @@
 PyQt6==6.10.1
 Pillow==10.2.0
+# HEIC/HEIF decoding. 0.22 is the newest release that accepts Pillow 10.2;
+# 1.x requires Pillow 11+.
+pillow-heif==0.22.0
+# DNG decoding via LibRaw.
+rawpy==0.27.1
 pytest==7.4.3
 scikit-learn==1.3.2
 numpy==1.26.2

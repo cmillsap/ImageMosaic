@@ -12,6 +12,8 @@ import numpy as np
 from PIL import Image
 import os
 
+from image_io import open_image
+
 
 @dataclass
 class BoundingBox:
@@ -128,7 +130,7 @@ class ImageTileAnalyzer:
             raise FileNotFoundError(f"Image file not found: {image_path}")
 
         try:
-            with Image.open(image_path) as img:
+            with open_image(image_path) as img:
                 # Convert to RGB if needed (handles RGBA, grayscale, etc.)
                 if img.mode != 'RGB':
                     img = img.convert('RGB')
