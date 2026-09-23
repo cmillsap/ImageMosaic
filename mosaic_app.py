@@ -177,6 +177,47 @@ class MosaicApp(QMainWindow):
         variety_layout.addStretch()
         tile_settings_layout.addLayout(variety_layout)
 
+        # Soft variety and colour tint. Unlike the hard limits above, these
+        # trade colour accuracy for variety gradually rather than all at once.
+        blend_layout = QHBoxLayout()
+
+        blend_layout.addWidget(QLabel("Variety:"))
+        self.variety_spinbox = QSpinBox()
+        self.variety_spinbox.setRange(0, 100)
+        self.variety_spinbox.setValue(0)
+        self.variety_spinbox.setSpecialValueText("off")
+        self.variety_spinbox.setToolTip(
+            "Favour images that have been used less, 0-100.\n"
+            "Each use makes an image slightly less likely to be picked again,\n"
+            "so more of your library appears at some cost to colour accuracy."
+        )
+        blend_layout.addWidget(self.variety_spinbox)
+
+        blend_layout.addWidget(QLabel("Colour tint:"))
+        self.tint_spinbox = QSpinBox()
+        self.tint_spinbox.setRange(0, 100)
+        self.tint_spinbox.setValue(0)
+        self.tint_spinbox.setSuffix("%")
+        self.tint_spinbox.setSpecialValueText("off")
+        self.tint_spinbox.setToolTip(
+            "Shift each image's colours toward the part of the guide it covers.\n"
+            "Makes loosely matched images read correctly, so Variety can be\n"
+            "raised without the mosaic going muddy. 15-30% is usually subtle."
+        )
+        blend_layout.addWidget(self.tint_spinbox)
+
+        blend_layout.addStretch()
+        tile_settings_layout.addLayout(blend_layout)
+
+        self.randomize_order_checkbox = QCheckBox("Randomize placement order")
+        self.randomize_order_checkbox.setChecked(True)
+        self.randomize_order_checkbox.setToolTip(
+            "Fill cells in a shuffled order rather than row by row. When\n"
+            "Variety or a limit is on, this spreads the compromise evenly\n"
+            "instead of leaving the bottom rows with the leftover images."
+        )
+        tile_settings_layout.addWidget(self.randomize_order_checkbox)
+
         tile_settings_group.setLayout(tile_settings_layout)
         main_layout.addWidget(tile_settings_group)
 
@@ -523,6 +564,9 @@ class MosaicApp(QMainWindow):
             scan_subdirectories=self.scan_subdirectories,
             max_tile_reuse=self.max_reuse_spinbox.value(),
             min_reuse_distance=self.min_distance_spinbox.value(),
+            variety=self.variety_spinbox.value(),
+            randomize_order=self.randomize_order_checkbox.isChecked(),
+            tint_strength=self.tint_spinbox.value(),
             cache_dir=self.tile_cache_dir(),
         )
 

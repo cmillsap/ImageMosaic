@@ -97,6 +97,35 @@ Tighter limits mean more variety but looser colour matching, and a cap that
 is arithmetically impossible (fewer tiles x uses than cells) is reported in
 the log.
 
+Three further settings work alongside the limits:
+
+- **Variety** (0-100) is a gentler alternative to a hard cap. Every use of
+  a photo adds a small penalty to its colour distance, so once the best
+  match has been used many times a nearly-as-good photo wins instead. The
+  scale is logarithmic because flat areas have many near-equivalent photos.
+  Measured on 600 tiles and 5,400 cells:
+
+  | Variety | Distinct photos | Most-used photo | Mean colour distance |
+  | --- | --- | --- | --- |
+  | off | 44 | 3,224x | 131 |
+  | 25 | 88 | 726x | 180 |
+  | 50 | 181 | 197x | 230 |
+  | 75 | 329 | 61x | 281 |
+  | 100 | 389 | 34x | 300 |
+
+- **Colour tint** (0-100%) shifts each photo's colours toward the part of
+  the guide it covers, section by section of the 3x3 grid. The shift is
+  added to every pixel rather than blended in, so the photo keeps its
+  detail. Tinting is what makes a high Variety setting usable: loosely
+  matched photos still read as the right colour from a distance.
+  15-30% is subtle; much higher starts to look painted over.
+- **Randomize placement order** (on by default) fills cells in a shuffled
+  order instead of row by row. Row by row, the top of the mosaic gets the
+  best photos and the bottom gets the leftovers - on a guide with uniform
+  content, colour error was 25% worse at the bottom than the top. Shuffled,
+  it is even throughout. The shuffle is seeded, so the same settings always
+  produce the same mosaic.
+
 ## Performance
 
 Analysing the tile library dominates runtime; everything else is minor by

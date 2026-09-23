@@ -6,6 +6,7 @@ import os
 import shutil
 import tempfile
 
+import numpy as np
 import pytest
 from PIL import Image
 
@@ -14,11 +15,14 @@ from tile_analyzer import ColorAverage, ImageTileAnalyzer
 from tile_database import TileDatabase
 from tile_preprocessor import PreprocessorConfig, TilePreprocessor
 from mosaic_renderer import (
+    MAX_REUSE_PENALTY,
+    MIN_REUSE_PENALTY,
     MosaicRenderer,
     RenderConfig,
     RenderStats,
     TilePlacement,
     _TileBitmapCache,
+    tint_tile,
 )
 
 
@@ -101,6 +105,9 @@ class TestRenderConfig:
         assert config.tile_size == (100, 100)
         assert config.max_tile_reuse == 0
         assert config.min_reuse_distance == 0
+        assert config.variety == 0
+        assert config.tint_strength == 0
+        assert config.randomize_order is True
 
     def test_aspect_ratio(self):
         assert RenderConfig(120, 80).tile_aspect_ratio == pytest.approx(1.5)
@@ -114,10 +121,36 @@ class TestRenderConfig:
         {"min_reuse_distance": -1},
         {"tile_cache_mb": 0},
         {"tile_cache_size": 0},
+        {"variety": -1},
+        {"variety": 101},
+        {"variety_pool": 0},
+        {"tint_strength": -1},
+        {"tint_strength": 101},
     ])
     def test_rejects_invalid_values(self, kwargs):
         with pytest.raises(ValueError):
             RenderConfig(**kwargs)
+
+
+class TestReusePenalty:
+    """Variety maps onto the penalty logarithmically: the useful range
+    spans three orders of magnitude."""
+
+    def test_off_is_zero(self):
+        assert RenderConfig(variety=0).reuse_penalty == 0
+
+    def test_endpoints(self):
+        assert RenderConfig(variety=1).reuse_penalty == pytest.approx(MIN_REUSE_PENALTY)
+        assert RenderConfig(variety=100).reuse_penalty == pytest.approx(MAX_REUSE_PENALTY)
+
+    def test_increases_with_variety(self):
+        penalties = [RenderConfig(variety=v).reuse_penalty for v in range(101)]
+        assert penalties == sorted(penalties)
+        assert len(set(penalties)) == 101
+
+    def test_midpoint_is_geometric(self):
+        mid = RenderConfig(variety=50).reuse_penalty
+        assert MIN_REUSE_PENALTY * 10 < mid < MAX_REUSE_PENALTY / 10
 
 
 class TestTileCacheSizing:
@@ -190,6 +223,19 @@ class TestPlan:
 
         assert dominant(left)[0] > dominant(left)[2], "left half should be reddish"
         assert dominant(right)[2] > dominant(right)[0], "right half should be bluish"
+
+    def test_row_major_order_when_randomized(self, database, guide):
+        """Shuffling changes the visiting order, not the returned order."""
+        renderer = MosaicRenderer(
+            database, RenderConfig(TILE_W, TILE_H, randomize_order=True))
+        rows, cols = guide.grid_dimensions
+        expected = [(r, c) for r in range(rows) for c in range(cols)]
+        assert [(p.row, p.col) for p in renderer.plan(guide)] == expected
+
+    def test_target_colours_are_recorded(self, renderer, guide):
+        for p in renderer.plan(guide):
+            expected = [c.as_tuple() for c in guide.get_cell_colors(p.row, p.col)]
+            assert list(p.target_colors) == expected
 
     def test_distances_are_recorded(self, renderer, guide):
         assert all(p.distance >= 0 for p in renderer.plan(guide))
@@ -328,6 +374,21 @@ class TestRepetitionConstraints:
         even_split = math.ceil(stats.total_cells / stats.distinct_tiles)
         assert stats.max_tile_uses <= even_split + 2, stats
 
+    def test_adjacency_holds_in_every_direction_when_shuffled(self, database, temp_dir):
+        """With a shuffled order, neighbours below and to the right can be
+        placed first, so the check must look all the way round."""
+        guide = self._uniform_guide(temp_dir, cols=8, rows=8)
+        for seed in range(5):
+            renderer = MosaicRenderer(database, RenderConfig(
+                TILE_W, TILE_H, min_reuse_distance=1, candidate_pool=8,
+                randomize_order=True, seed=seed))
+            grid = {(p.row, p.col): p.image_path for p in renderer.plan(guide)}
+            for (row, col), path in grid.items():
+                for dr in (-1, 0, 1):
+                    for dc in (-1, 0, 1):
+                        if (dr or dc) and grid.get((row + dr, col + dc)) == path:
+                            pytest.fail(f"seed {seed}: repeat at {(row, col)}")
+
     def test_impossible_cap_is_logged(self, database, temp_dir, caplog):
         guide = self._uniform_guide(temp_dir, cols=10, rows=10)
         renderer = MosaicRenderer(
@@ -336,6 +397,187 @@ class TestRepetitionConstraints:
         with caplog.at_level('WARNING'):
             renderer.plan(guide)
         assert any('max_tile_reuse' in r.message for r in caplog.records)
+
+
+# ============================================================================
+# Visiting order
+# ============================================================================
+
+class TestVisitingOrder:
+
+    def _flat_guide(self, temp_dir, cols=8, rows=8):
+        img = Image.new('RGB', (cols * TILE_W, rows * TILE_H), (128, 128, 128))
+        path = os.path.join(temp_dir, 'flat.png')
+        img.save(path)
+        return GuideImage(path, cols * TILE_W, rows * TILE_H, TILE_W, TILE_H)
+
+    def _capped(self, database, **kw):
+        # 8 tiles x 4 uses = 32 placements for 64 cells: half must relax.
+        return MosaicRenderer(database, RenderConfig(
+            TILE_W, TILE_H, max_tile_reuse=4, candidate_pool=8, **kw))
+
+    def test_row_major_leaves_the_bottom_with_the_leftovers(self, database, temp_dir):
+        """Establishes the problem shuffling solves."""
+        guide = self._flat_guide(temp_dir)
+        placements = self._capped(database, randomize_order=False).plan(guide)
+        relaxed_rows = {p.row for p in placements if p.constraint_relaxed}
+        assert min(relaxed_rows) >= 4, "top half should get every good tile"
+
+    def test_shuffled_spreads_the_compromise(self, database, temp_dir):
+        guide = self._flat_guide(temp_dir)
+        placements = self._capped(database, randomize_order=True).plan(guide)
+        top = sum(p.constraint_relaxed for p in placements if p.row < 4)
+        bottom = sum(p.constraint_relaxed for p in placements if p.row >= 4)
+        assert top > 0 and bottom > 0
+        assert abs(top - bottom) <= 12
+
+    def test_shuffle_is_reproducible(self, database, temp_dir):
+        guide = self._flat_guide(temp_dir)
+        first = self._capped(database, seed=7).plan(guide)
+        second = self._capped(database, seed=7).plan(guide)
+        assert [p.image_path for p in first] == [p.image_path for p in second]
+
+    def test_seed_changes_the_layout(self, database, temp_dir):
+        guide = self._flat_guide(temp_dir)
+        first = self._capped(database, seed=1).plan(guide)
+        second = self._capped(database, seed=2).plan(guide)
+        assert [p.image_path for p in first] != [p.image_path for p in second]
+
+
+# ============================================================================
+# Variety (soft reuse penalty)
+# ============================================================================
+
+class TestVariety:
+
+    @pytest.fixture
+    def grey_library(self, temp_dir):
+        """Twelve greys, one level apart, moving away from the guide's 128.
+
+        Close together, like the near-equivalent photos a real library
+        has for any flat area, so the small penalty can reach them.
+        """
+        folder = os.path.join(temp_dir, 'greys')
+        _write_tiles(folder, [(128 + i,) * 3 for i in range(12)])
+        db = TileDatabase()
+        db.load_tiles_from_folder(folder)
+        return db
+
+    def _flat_guide(self, temp_dir):
+        img = Image.new('RGB', (10 * TILE_W, 10 * TILE_H), (128, 128, 128))
+        path = os.path.join(temp_dir, 'flat.png')
+        img.save(path)
+        return GuideImage(path, 10 * TILE_W, 10 * TILE_H, TILE_W, TILE_H)
+
+    def _stats(self, db, guide, **kw):
+        renderer = MosaicRenderer(db, RenderConfig(TILE_W, TILE_H, **kw))
+        return renderer.summarize(renderer.plan(guide))
+
+    def test_off_uses_only_the_best_tile(self, grey_library, temp_dir):
+        stats = self._stats(grey_library, self._flat_guide(temp_dir), variety=0)
+        assert stats.distinct_tiles == 1
+
+    def test_uses_more_tiles(self, grey_library, temp_dir):
+        stats = self._stats(grey_library, self._flat_guide(temp_dir), variety=100)
+        assert stats.distinct_tiles > 1
+        assert stats.max_tile_uses < stats.total_cells
+
+    def test_more_variety_never_uses_fewer_tiles(self, grey_library, temp_dir):
+        guide = self._flat_guide(temp_dir)
+        counts = [self._stats(grey_library, guide, variety=v).distinct_tiles
+                  for v in (0, 25, 50, 75, 100)]
+        assert counts == sorted(counts), counts
+        assert counts[-1] > counts[0]
+
+    def test_trades_colour_accuracy_for_variety(self, grey_library, temp_dir):
+        guide = self._flat_guide(temp_dir)
+        off = self._stats(grey_library, guide, variety=0)
+        on = self._stats(grey_library, guide, variety=100)
+        assert on.mean_distance > off.mean_distance
+
+    def test_does_not_override_a_far_better_match(self, database, guide):
+        """A small penalty must not put a green tile on a red cell."""
+        renderer = MosaicRenderer(database, RenderConfig(
+            TILE_W, TILE_H, variety=100))
+        for p in renderer.plan(guide):
+            avg = np.mean([c.as_tuple() for c in p.tile_data.get_all_colors()], axis=0)
+            if p.col < 2:
+                assert avg[0] > avg[2], p
+            else:
+                assert avg[2] > avg[0], p
+
+    def test_hard_cap_still_holds(self, grey_library, temp_dir):
+        stats = self._stats(grey_library, self._flat_guide(temp_dir),
+                            variety=30, max_tile_reuse=10)
+        assert stats.max_tile_uses <= 10
+
+    def test_widens_the_candidate_pool(self, grey_library, temp_dir):
+        """Only tiles in the shortlist can be reached, so variety must look
+        further than the hard-limit pool does."""
+        guide = self._flat_guide(temp_dir)
+        narrow = self._stats(grey_library, guide, variety=100, variety_pool=2)
+        wide = self._stats(grey_library, guide, variety=100, variety_pool=12)
+        assert narrow.distinct_tiles <= 2
+        assert wide.distinct_tiles > narrow.distinct_tiles
+
+
+# ============================================================================
+# Colour tint
+# ============================================================================
+
+def _striped(size=12, low=60, high=120):
+    """A tile of alternating light and dark columns, averaging 90."""
+    pixels = np.zeros((size, size, 3), np.uint8)
+    pixels[:, ::2] = high
+    pixels[:, 1::2] = low
+    return Image.fromarray(pixels)
+
+
+class TestTintTile:
+
+    def test_zero_strength_is_a_no_op(self):
+        tile = _striped()
+        assert tint_tile(tile, [(255, 0, 0)] * 9, 0) is tile
+
+    def test_full_strength_reaches_the_target(self):
+        tile = Image.new('RGB', (12, 12), (40, 40, 40))
+        tinted = np.asarray(tint_tile(tile, [(200, 100, 50)] * 9, 1.0))
+        assert np.allclose(tinted, (200, 100, 50), atol=1)
+
+    def test_half_strength_goes_halfway(self):
+        tile = Image.new('RGB', (12, 12), (40, 40, 40))
+        tinted = np.asarray(tint_tile(tile, [(200, 100, 40)] * 9, 0.5))
+        assert np.allclose(tinted, (120, 70, 40), atol=1)
+
+    def test_keeps_the_tile_detail(self):
+        """Additive, not a blend: the stripes keep their contrast."""
+        tile = _striped()
+        tinted = np.asarray(tint_tile(tile, [(150, 150, 150)] * 9, 1.0), float)
+        original = np.asarray(tile, float)
+        assert tinted.mean() == pytest.approx(150, abs=1)
+        assert tinted.std() == pytest.approx(original.std(), abs=1)
+
+    def test_follows_each_section(self):
+        """Each third of the tile moves toward its own target."""
+        tile = Image.new('RGB', (30, 30), (100, 100, 100))
+        targets = [(250, 0, 0), (250, 0, 0), (250, 0, 0),
+                   (100, 100, 100), (100, 100, 100), (100, 100, 100),
+                   (0, 0, 250), (0, 0, 250), (0, 0, 250)]
+        tinted = np.asarray(tint_tile(tile, targets, 1.0))
+        top, bottom = tinted[2, 15], tinted[27, 15]
+        assert top[0] > 200 and top[2] < 50
+        assert bottom[2] > 200 and bottom[0] < 50
+
+    def test_clips_instead_of_wrapping(self):
+        tile = _striped(low=200, high=255)
+        tinted = np.asarray(tint_tile(tile, [(255, 255, 255)] * 9, 1.0))
+        assert tinted.min() >= 200   # uint8 wraparound would show as dark
+
+    def test_preserves_size_and_mode(self):
+        tile = Image.new('RGB', (17, 9), (10, 20, 30))
+        tinted = tint_tile(tile, [(90, 90, 90)] * 9, 0.4)
+        assert tinted.size == (17, 9)
+        assert tinted.mode == 'RGB'
 
 
 # ============================================================================
@@ -361,6 +603,40 @@ class TestComposite:
         right = image.getpixel((3 * TILE_W + TILE_W // 2, TILE_H // 2))
         assert left[0] > left[2]
         assert right[2] > right[0]
+
+    def test_tint_pulls_tiles_toward_the_guide(self, temp_dir, guide):
+        """A lone black tile, fully tinted, reproduces the red/blue guide."""
+        folder = os.path.join(temp_dir, 'black')
+        _write_tiles(folder, [(0, 0, 0)])
+        db = TileDatabase()
+        db.load_tiles_from_folder(folder)
+        renderer = MosaicRenderer(db, RenderConfig(TILE_W, TILE_H,
+                                                   tint_strength=100))
+        image = renderer.composite(renderer.plan(guide), guide.grid_dimensions)
+        assert image.getpixel((5, 5))[0] > 200
+        assert image.getpixel((35, 5))[2] > 200
+
+    def test_no_tint_leaves_tiles_untouched(self, temp_dir, guide):
+        folder = os.path.join(temp_dir, 'black')
+        _write_tiles(folder, [(0, 0, 0)])
+        db = TileDatabase()
+        db.load_tiles_from_folder(folder)
+        renderer = MosaicRenderer(db, RenderConfig(TILE_W, TILE_H))
+        image = renderer.composite(renderer.plan(guide), guide.grid_dimensions)
+        assert image.getpixel((5, 5)) == (0, 0, 0)
+
+    def test_tint_does_not_alter_the_cached_tile(self, temp_dir, guide):
+        """One tile placed on red and blue cells must not carry one cell's
+        tint into the next."""
+        folder = os.path.join(temp_dir, 'black')
+        paths = _write_tiles(folder, [(0, 0, 0)])
+        db = TileDatabase()
+        db.load_tiles_from_folder(folder)
+        renderer = MosaicRenderer(db, RenderConfig(TILE_W, TILE_H,
+                                                   tint_strength=100))
+        renderer.composite(renderer.plan(guide), guide.grid_dimensions)
+        cached = renderer._cache.get(paths[0])
+        assert cached.getpixel((5, 5)) == (0, 0, 0)
 
     def test_rejects_empty_grid(self, renderer):
         with pytest.raises(ValueError):

@@ -155,6 +155,22 @@ class TestMosaicJob:
         assert config.max_tile_reuse == 7
         assert config.min_reuse_distance == 3
 
+    def test_variety_order_and_tint_reach_render_config(self, job):
+        job.variety = 40
+        job.randomize_order = False
+        job.tint_strength = 25
+        config = job.render_config()
+        assert config.variety == 40
+        assert config.randomize_order is False
+        assert config.tint_strength == 25
+
+    def test_new_settings_default_to_previous_behaviour(self, job):
+        """Variety and tint are opt-in; only the visiting order changes."""
+        config = job.render_config()
+        assert config.variety == 0
+        assert config.tint_strength == 0
+        assert config.randomize_order is True
+
 
 # ============================================================================
 # Stage weights

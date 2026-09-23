@@ -17,8 +17,10 @@ import logging
 import os
 from collections import OrderedDict
 from dataclasses import dataclass, field
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
+import cv2
+import numpy as np
 from PIL import Image
 
 from guide_image import GuideImage
@@ -33,6 +35,21 @@ logger = logging.getLogger(__name__)
 ProgressCallback = Callable[[int, int, str], None]
 # Polled during long loops; returning True aborts with RenderCancelled.
 CancelCheck = Callable[[], bool]
+
+
+# Colour-distance penalty per earlier use of a tile, at variety 1 and 100.
+# Variety maps onto this range logarithmically, because the useful range
+# spans three orders of magnitude: flat areas of a guide have many tiles
+# only slightly worse than the best, so even a tiny penalty moves cells onto
+# them once the best tile has been used hundreds of times. Measured on 600
+# tiles / 5,400 cells (colour distance is Euclidean over the 27 values):
+#     penalty 0     ->  44 distinct, most-used tile 3224x, mean distance 131
+#     penalty 0.05  ->  52 distinct, most-used tile 2120x, mean distance 143
+#     penalty 1     -> 148 distinct, most-used tile  270x, mean distance 217
+#     penalty 50    -> 389 distinct, most-used tile   34x, mean distance 300
+# Past 50 nothing changes: every tile in reach is already in use.
+MIN_REUSE_PENALTY = 0.05
+MAX_REUSE_PENALTY = 50.0
 
 
 class RenderCancelled(Exception):
@@ -76,6 +93,30 @@ class RenderConfig:
     # sit far from the colours the tile library actually covers.
     candidate_pool: int = 25
 
+    # Soft repetition control, 0-100. Rather than rejecting a tile outright,
+    # every earlier use of it adds a penalty to its colour distance (see
+    # MIN/MAX_REUSE_PENALTY), so good-enough tiles win once the best ones
+    # have been used many times. 0 disables it.
+    variety: int = 0
+
+    # Candidates considered when variety is on. The penalty can only move a
+    # cell onto a tile that is in its shortlist, so this needs to be wider
+    # than candidate_pool for the penalty to reach beyond the closest few.
+    variety_pool: int = 100
+
+    # Visit cells in a shuffled order instead of row by row. Row-major lets
+    # the top rows claim the best tiles and leaves the bottom rows with the
+    # leftovers whenever variety or a reuse cap is active; a shuffled order
+    # spreads that compromise evenly. Seeded, so a render is reproducible.
+    randomize_order: bool = True
+    seed: int = 0
+
+    # How far each tile's colours are shifted toward its cell's, 0-100.
+    # The shift is per section of the 3x3 grid and additive, so a tile keeps
+    # its own detail and contrast while taking on the guide's colour. This
+    # is what lets a loosely matched tile read correctly from a distance.
+    tint_strength: int = 0
+
     # Memory budget for prepared tile bitmaps held during compositing.
     # Expressed in megabytes rather than as a tile count because a count
     # that is comfortable at 100x100 (3 MB) would be 49 GB at 2000x2000.
@@ -100,6 +141,16 @@ class RenderConfig:
             )
         if self.max_tile_reuse < 0:
             raise ValueError("max_tile_reuse cannot be negative")
+        if not 0 <= self.variety <= 100:
+            raise ValueError(f"variety must be 0-100, got {self.variety}")
+        if self.variety_pool < 1:
+            raise ValueError(
+                f"variety_pool must be at least 1, got {self.variety_pool}"
+            )
+        if not 0 <= self.tint_strength <= 100:
+            raise ValueError(
+                f"tint_strength must be 0-100, got {self.tint_strength}"
+            )
         if self.min_reuse_distance < 0:
             raise ValueError("min_reuse_distance cannot be negative")
         if self.tile_cache_mb <= 0:
@@ -113,6 +164,18 @@ class RenderConfig:
             return self.tile_cache_size
         bytes_per_tile = self.tile_width * self.tile_height * 3
         return max(1, (self.tile_cache_mb * 1024 * 1024) // bytes_per_tile)
+
+    @property
+    def reuse_penalty(self) -> float:
+        """Colour-distance penalty added per earlier use of a tile.
+
+        0 when variety is off, else logarithmic from MIN_REUSE_PENALTY at
+        variety 1 to MAX_REUSE_PENALTY at variety 100.
+        """
+        if self.variety == 0:
+            return 0.0
+        ratio = MAX_REUSE_PENALTY / MIN_REUSE_PENALTY
+        return MIN_REUSE_PENALTY * ratio ** ((self.variety - 1) / 99)
 
     @property
     def tile_size(self) -> Tuple[int, int]:
@@ -134,6 +197,8 @@ class TilePlacement:
     #  True when repetition constraints could not be satisfied and the
     #  closest match was used regardless.
     constraint_relaxed: bool = False
+    #  The cell's nine (r, g, b) section colours, row-major, for tinting.
+    target_colors: Optional[Sequence[Tuple[int, int, int]]] = None
 
     @property
     def image_path(self) -> str:
@@ -161,6 +226,29 @@ class RenderStats:
                 f"relaxed={self.relaxed_cells}, "
                 f"mean_distance={self.mean_distance:.2f}, "
                 f"max_uses={self.max_tile_uses})")
+
+
+def tint_tile(tile: Image.Image,
+              target_colors: Sequence[Tuple[int, int, int]],
+              strength: float) -> Image.Image:
+    """Shift a tile's colours toward nine target section colours.
+
+    The tile's own 3x3 section averages are measured, the difference to the
+    targets is interpolated smoothly across the tile, and a `strength`
+    fraction (0-1) of it is added to every pixel. Adding rather than
+    blending keeps the tile's detail: at full strength its colours move to
+    the targets, but its texture is untouched.
+    """
+    if strength <= 0:
+        return tile
+    pixels = np.asarray(tile, dtype=np.float32)
+    height, width = pixels.shape[:2]
+    current = cv2.resize(pixels, (3, 3), interpolation=cv2.INTER_AREA)
+    target = np.asarray(target_colors, dtype=np.float32).reshape(3, 3, 3)
+    shift = cv2.resize(target - current, (width, height),
+                       interpolation=cv2.INTER_LINEAR)
+    tinted = pixels + min(strength, 1.0) * shift
+    return Image.fromarray(np.clip(np.rint(tinted), 0, 255).astype(np.uint8))
 
 
 class _TileBitmapCache:
@@ -229,9 +317,9 @@ class MosaicRenderer:
         """
         Choose a tile for every cell of the guide grid.
 
-        Cells are visited in row-major order, which is what makes the
-        adjacency constraint meaningful: by the time a cell is considered,
-        its neighbours above and to the left are already placed.
+        Cells are visited in a seeded shuffled order when
+        config.randomize_order is set, otherwise row by row. Either way the
+        result comes back in row-major order.
 
         Args:
             guide: The analysed guide image
@@ -269,17 +357,22 @@ class MosaicRenderer:
                 cap * self._database.size(), total
             )
 
-        placements: List[TilePlacement] = []
+        cells = list(guide.iter_cells())
+        if self.config.randomize_order:
+            rng = np.random.default_rng(self.config.seed)
+            cells = [cells[i] for i in rng.permutation(len(cells))]
+
+        placements: List[Optional[TilePlacement]] = [None] * total
         # grid[row][col] -> image_path, for the adjacency lookup
         grid: List[List[Optional[str]]] = [[None] * cols for _ in range(rows)]
         usage: Dict[str, int] = {}
 
-        for index, cell in enumerate(guide.iter_cells()):
+        for index, cell in enumerate(cells):
             if should_cancel is not None and index % 64 == 0 and should_cancel():
                 raise RenderCancelled("Cancelled while matching tiles")
 
             placement = self._choose_tile(cell, grid, usage)
-            placements.append(placement)
+            placements[cell.row * cols + cell.col] = placement
             grid[cell.row][cell.col] = placement.image_path
             usage[placement.image_path] = usage.get(placement.image_path, 0) + 1
 
@@ -289,40 +382,51 @@ class MosaicRenderer:
         return placements
 
     def _choose_tile(self, cell, grid, usage) -> TilePlacement:
-        """Pick the closest candidate that satisfies the repetition rules."""
+        """Pick the best-scoring candidate that satisfies the hard limits.
+
+        A candidate's score is its colour distance plus the variety penalty
+        for each time it has already been used. With variety off, that is
+        simply the closest allowed candidate.
+        """
         config = self.config
         constrained = config.max_tile_reuse > 0 or config.min_reuse_distance > 0
+        penalty = config.reuse_penalty
 
-        # Without constraints a single neighbour is all that is needed.
-        k = config.candidate_pool if constrained else 1
-        candidates = self._database.find_k_nearest_neighbors(
-            cell.get_colors(), k=k
-        )
+        # With no limits and no penalty a single neighbour is all we need.
+        k = 1
+        if constrained:
+            k = config.candidate_pool
+        if penalty:
+            k = max(k, config.variety_pool)
+        colors = cell.get_colors()
+        candidates = self._database.find_k_nearest_neighbors(colors, k=k)
 
         if not candidates:
             raise RuntimeError("Tile search returned no candidates")
 
-        if constrained:
-            for result in candidates:
-                path = result.tile_data.image_path
-                if self._is_allowed(path, cell.row, cell.col, grid, usage):
-                    return TilePlacement(cell.row, cell.col,
-                                         result.tile_data, result.distance)
+        targets = [c.as_tuple() for c in colors]
 
-            # Every candidate was rejected. Falling back to the closest match
-            # would pile more placements onto the tile that is already the
-            # most overused, so prefer the least-used candidate instead and
-            # break ties on colour distance. This keeps the reuse cap roughly
-            # honoured even when the pool is too small to satisfy it exactly.
-            best = min(candidates,
-                       key=lambda r: (usage.get(r.tile_data.image_path, 0),
-                                      r.distance))
+        allowed = [r for r in candidates
+                   if not constrained or self._is_allowed(
+                       r.tile_data.image_path, cell.row, cell.col, grid, usage)]
+        if allowed:
+            best = min(allowed, key=lambda r: (
+                r.distance + penalty * usage.get(r.tile_data.image_path, 0)))
             return TilePlacement(cell.row, cell.col, best.tile_data,
-                                 best.distance, constraint_relaxed=True)
+                                 best.distance, target_colors=targets)
 
-        # Unconstrained: the nearest neighbour is the answer.
-        best = candidates[0]
-        return TilePlacement(cell.row, cell.col, best.tile_data, best.distance)
+        # Every candidate was rejected by a hard limit (without limits every
+        # candidate is allowed). Falling back to the closest match would pile
+        # more placements onto the tile that is already the most overused,
+        # so prefer the least-used candidate instead and break ties on
+        # colour distance. This keeps the reuse cap roughly honoured even
+        # when the pool is too small to satisfy it exactly.
+        best = min(candidates,
+                   key=lambda r: (usage.get(r.tile_data.image_path, 0),
+                                  r.distance))
+        return TilePlacement(cell.row, cell.col, best.tile_data,
+                             best.distance, constraint_relaxed=True,
+                             target_colors=targets)
 
     def _is_allowed(self, path: str, row: int, col: int, grid, usage) -> bool:
         """Check a candidate against the reuse cap and adjacency radius."""
@@ -333,15 +437,15 @@ class MosaicRenderer:
 
         distance = config.min_reuse_distance
         if distance:
-            # Only cells already placed can conflict, so scanning the full
-            # square is wasteful but simple, and the radius is small.
+            # Scan the whole square: with a shuffled visiting order, cells
+            # below and to the right may already be placed too. Unplaced
+            # cells, this one included, hold None and never match.
             row_start = max(0, row - distance)
+            row_end = min(len(grid) - 1, row + distance)
             col_start = max(0, col - distance)
             col_end = min(len(grid[0]) - 1, col + distance)
-            for r in range(row_start, row + 1):
+            for r in range(row_start, row_end + 1):
                 for c in range(col_start, col_end + 1):
-                    if r == row and c >= col:
-                        break
                     if grid[r][c] == path:
                         return False
 
@@ -391,6 +495,11 @@ class MosaicRenderer:
             bitmap = self._get_tile_bitmap(placement.image_path)
             if bitmap is None:
                 continue  # Unreadable tile; leave the cell black.
+            if self.config.tint_strength and placement.target_colors:
+                # Tinted per cell, after the cache, so the cached bitmap
+                # stays the untouched original shared by every placement.
+                bitmap = tint_tile(bitmap, placement.target_colors,
+                                   self.config.tint_strength / 100)
             canvas.paste(bitmap, (placement.col * tile_w,
                                   placement.row * tile_h))
 

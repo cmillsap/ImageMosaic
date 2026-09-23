@@ -76,6 +76,9 @@ class MosaicJob:
     scan_subdirectories: bool = False
     max_tile_reuse: int = 0
     min_reuse_distance: int = 0
+    variety: int = 0
+    randomize_order: bool = True
+    tint_strength: int = 0
     cache_dir: Optional[str] = None
     #: Worker processes for tile analysis; None picks a capped core count.
     max_workers: Optional[int] = None
@@ -94,6 +97,9 @@ class MosaicJob:
             tile_height=self.tile_height,
             max_tile_reuse=self.max_tile_reuse,
             min_reuse_distance=self.min_reuse_distance,
+            variety=self.variety,
+            randomize_order=self.randomize_order,
+            tint_strength=self.tint_strength,
         )
 
 

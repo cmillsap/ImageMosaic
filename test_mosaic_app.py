@@ -266,6 +266,27 @@ class TestJobSnapshot:
         assert job.max_tile_reuse == 6
         assert job.min_reuse_distance == 3
 
+    def test_captures_variety_tint_and_order(self, window, tmp_path):
+        window.variety_spinbox.setValue(35)
+        window.tint_spinbox.setValue(20)
+        window.randomize_order_checkbox.setChecked(False)
+        job = self._job(window, str(tmp_path))
+        assert job.variety == 35
+        assert job.tint_strength == 20
+        assert job.randomize_order is False
+
+    def test_variety_and_tint_start_off(self, window, tmp_path):
+        assert window.variety_spinbox.text() == "off"
+        assert window.tint_spinbox.text() == "off"
+        job = self._job(window, str(tmp_path))
+        assert job.variety == 0
+        assert job.tint_strength == 0
+        assert job.randomize_order is True
+
+    def test_variety_and_tint_are_bounded(self, window):
+        for box in (window.variety_spinbox, window.tint_spinbox):
+            assert (box.minimum(), box.maximum()) == (0, 100)
+
     def test_captures_subdirectory_flag(self, window, tmp_path):
         window.subdirs_checkbox.setChecked(True)
         job = self._job(window, str(tmp_path))
