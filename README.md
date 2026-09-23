@@ -28,6 +28,7 @@ through it.
 | `mosaic_renderer.py` | Chooses a tile per cell, then composites |
 | `mosaic_worker.py` | Runs the pipeline off the GUI thread |
 | `mosaic_app.py` | PyQt6 user interface |
+| `result_viewer.py` | Zoomable window showing the finished mosaic |
 
 ## Installation
 
@@ -71,7 +72,13 @@ python mosaic_app.py
    resulting grid, e.g. `Grid: 60 x 90 = 5,400 tiles`.
 4. Optionally limit repetition (see below).
 5. Set the **output size** in inches; output is rendered at 300 DPI.
-6. **Generate Mosaic**, choose where to save, and watch the progress bar.
+   Mosaics are saved to your Documents folder as `<guide name>_mosaic.png`;
+   use **Browse** next to *Save to* to pick another folder (remembered next
+   time), and the format box for JPEG or TIFF. An existing file is never
+   overwritten - a repeat run is numbered instead.
+6. **Generate Mosaic** and watch the progress bar. When it finishes, the
+   mosaic opens in its own window: scroll to zoom, drag to pan, and close
+   it when you are done.
    Generation runs on a background thread and can be cancelled at any time.
 
 ### Controlling repetition

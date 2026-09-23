@@ -11,10 +11,11 @@ from PIL import Image
 # Qt needs an offscreen platform plugin under CI / headless runs.
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PyQt6.QtCore import QThread
-from PyQt6.QtWidgets import QApplication, QMessageBox
+from PyQt6.QtCore import QThread, QStandardPaths, QSettings
+from PyQt6.QtWidgets import QApplication, QFileDialog, QMessageBox
 
 from mosaic_app import MosaicApp
+from result_viewer import ResultViewer
 from tile_preprocessor import PreprocessorConfig
 
 
@@ -26,9 +27,15 @@ def qapp():
 
 
 @pytest.fixture
-def window(qapp):
+def settings(tmp_path):
+    """Settings in a throwaway file, never the user's real preferences."""
+    return QSettings(str(tmp_path / "settings.ini"), QSettings.Format.IniFormat)
+
+
+@pytest.fixture
+def window(qapp, settings):
     """A fresh MosaicApp window per test."""
-    w = MosaicApp()
+    w = MosaicApp(settings)
     yield w
     w.close()
 
@@ -313,6 +320,68 @@ class TestGenerateGuards:
 
 
 # ============================================================================
+# Output location
+# ============================================================================
+
+class TestOutputLocation:
+
+    def test_defaults_to_documents(self, window):
+        documents = QStandardPaths.writableLocation(
+            QStandardPaths.StandardLocation.DocumentsLocation)
+        assert window.output_folder == documents
+        assert window.output_folder_edit.text() == documents
+
+    def test_browse_sets_the_folder(self, window, monkeypatch, tmp_path):
+        monkeypatch.setattr(QFileDialog, 'getExistingDirectory',
+                            lambda *a, **k: str(tmp_path))
+        window.select_output_folder()
+        assert window.output_folder == str(tmp_path)
+        assert window.output_folder_edit.text() == str(tmp_path)
+
+    def test_browsed_folder_is_remembered(self, window, qapp, settings,
+                                          monkeypatch, tmp_path):
+        monkeypatch.setattr(QFileDialog, 'getExistingDirectory',
+                            lambda *a, **k: str(tmp_path))
+        window.select_output_folder()
+
+        reopened = MosaicApp(settings)
+        assert reopened.output_folder == str(tmp_path)
+        assert reopened.output_folder_edit.text() == str(tmp_path)
+        reopened.close()
+
+    def test_missing_remembered_folder_falls_back(self, qapp, settings, tmp_path):
+        settings.setValue("output_folder", str(tmp_path / "deleted"))
+        w = MosaicApp(settings)
+        assert w.output_folder == QStandardPaths.writableLocation(
+            QStandardPaths.StandardLocation.DocumentsLocation)
+        w.close()
+
+    def test_cancelled_browse_keeps_the_folder(self, window, monkeypatch):
+        before = window.output_folder
+        monkeypatch.setattr(QFileDialog, 'getExistingDirectory',
+                            lambda *a, **k: "")
+        window.select_output_folder()
+        assert window.output_folder == before
+
+    def test_path_is_named_after_the_guide(self, window, tmp_path):
+        window.output_folder = str(tmp_path)
+        window.guide_image_path = os.path.join("somewhere", "sunset.jpg")
+        assert window.choose_output_path() == str(tmp_path / "sunset_mosaic.png")
+
+    def test_path_follows_the_chosen_format(self, window, tmp_path):
+        window.output_folder = str(tmp_path)
+        window.output_format_combo.setCurrentIndex(
+            window.output_format_combo.findData(".jpg"))
+        assert window.choose_output_path() == str(tmp_path / "mosaic.jpg")
+
+    def test_existing_mosaic_is_not_overwritten(self, window, tmp_path):
+        window.output_folder = str(tmp_path)
+        (tmp_path / "mosaic.png").touch()
+        (tmp_path / "mosaic (2).png").touch()
+        assert window.choose_output_path() == str(tmp_path / "mosaic (3).png")
+
+
+# ============================================================================
 # Progress display
 # ============================================================================
 
@@ -402,6 +471,16 @@ class TestWorkerLifecycle:
 
         assert window.progress_group.isHidden() is True
         assert window.generate_btn.isEnabled() is True
+
+    def test_result_window_opens_on_success(self, window, monkeypatch, qapp, tmp_path):
+        output = self._start(window, monkeypatch, str(tmp_path))
+        self._drain(window, qapp)
+
+        assert isinstance(window.result_viewer, ResultViewer)
+        assert window.result_viewer.isVisible()
+        assert window.result_viewer.image_path == output
+        assert window.result_viewer.view is not None
+        window.result_viewer.close()
 
     def test_cancel_button_stops_the_run(self, window, monkeypatch, qapp, tmp_path):
         self._start(window, monkeypatch, str(tmp_path))

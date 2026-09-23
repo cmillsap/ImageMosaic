@@ -6,17 +6,42 @@ import tempfile
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                               QHBoxLayout, QPushButton, QLabel, QLineEdit,
                               QFileDialog, QGroupBox, QSizePolicy, QSpinBox,
-                              QCheckBox, QProgressBar, QMessageBox)
-from PyQt6.QtCore import Qt, QThread
+                              QCheckBox, QProgressBar, QMessageBox,
+                              QComboBox)
+from PyQt6.QtCore import Qt, QThread, QStandardPaths, QSettings
 from PyQt6.QtGui import QPixmap
 
 from mosaic_worker import MosaicJob, MosaicWorker
+from result_viewer import ResultViewer
 from tile_preprocessor import PreprocessorConfig
+
+# (label, extension) for each output format offered in the UI.
+OUTPUT_FORMATS = [("PNG", ".png"), ("JPEG", ".jpg"), ("TIFF", ".tif")]
+
+
+def default_output_folder() -> str:
+    """The user's Documents folder, or their home folder if there is none."""
+    documents = QStandardPaths.writableLocation(
+        QStandardPaths.StandardLocation.DocumentsLocation)
+    return documents or os.path.expanduser("~")
+
+
+def unique_path(folder: str, stem: str, ext: str) -> str:
+    """folder/stem+ext, numbered if needed so an earlier mosaic is kept."""
+    candidate = os.path.join(folder, stem + ext)
+    n = 2
+    while os.path.exists(candidate):
+        candidate = os.path.join(folder, f"{stem} ({n}){ext}")
+        n += 1
+    return candidate
 
 
 class MosaicApp(QMainWindow):
-    def __init__(self):
+    def __init__(self, settings: QSettings = None):
         super().__init__()
+        # Preferences that outlive the session. Injectable so tests never
+        # touch the real user's settings.
+        self.settings = settings or QSettings("ImageMosaic", "ImageMosaic")
         self.guide_image_path = None
         self.tile_folder_path = None
         self.scan_subdirectories = False
@@ -25,6 +50,8 @@ class MosaicApp(QMainWindow):
         self.output_height_inches = 30
         self.tile_width = 100
         self.tile_height = 100
+        self.output_folder = self.saved_output_folder()
+        self.result_viewer = None
         # Set while a render is in flight; both are None when idle.
         self.worker = None
         self.worker_thread = None
@@ -188,6 +215,26 @@ class MosaicApp(QMainWindow):
 
         # All labels exist now, so it is safe to populate them.
         self.update_derived_dimensions()
+
+        # Where the finished mosaic is written
+        output_path_layout = QHBoxLayout()
+        output_path_layout.addWidget(QLabel("Save to:"))
+
+        self.output_folder_edit = QLineEdit(self.output_folder)
+        self.output_folder_edit.setReadOnly(True)
+        output_path_layout.addWidget(self.output_folder_edit)
+
+        output_browse_btn = QPushButton("Browse")
+        output_browse_btn.clicked.connect(self.select_output_folder)
+        output_browse_btn.setMaximumWidth(100)
+        output_path_layout.addWidget(output_browse_btn)
+
+        self.output_format_combo = QComboBox()
+        for label, ext in OUTPUT_FORMATS:
+            self.output_format_combo.addItem(label, ext)
+        output_path_layout.addWidget(self.output_format_combo)
+
+        output_settings_layout.addLayout(output_path_layout)
 
         output_settings_group.setLayout(output_settings_layout)
         main_layout.addWidget(output_settings_group)
@@ -389,6 +436,30 @@ class MosaicApp(QMainWindow):
             self.folder_path_edit.setText(folder_path)
             self.check_ready_to_generate()
 
+    def select_output_folder(self):
+        """Open folder dialog to choose where mosaics are saved"""
+        folder_path = QFileDialog.getExistingDirectory(
+            self,
+            "Select Output Folder",
+            self.output_folder
+        )
+
+        if folder_path:
+            self.output_folder = folder_path
+            self.output_folder_edit.setText(folder_path)
+            self.settings.setValue("output_folder", folder_path)
+
+    def saved_output_folder(self) -> str:
+        """The last folder chosen with Browse, else Documents.
+
+        Falls back if the saved folder has since been deleted or was on a
+        drive that is no longer attached.
+        """
+        folder = self.settings.value("output_folder", "", type=str)
+        if folder and os.path.isdir(folder):
+            return folder
+        return default_output_folder()
+
     def update_scan_subdirectories(self, state):
         """Update the scan subdirectories setting based on checkbox state"""
         self.scan_subdirectories = state == Qt.CheckState.Checked.value
@@ -465,19 +536,16 @@ class MosaicApp(QMainWindow):
         return os.path.join(tempfile.gettempdir(), "image_mosaic_tile_cache")
 
     def choose_output_path(self):
-        """Ask where to save. Returns None if the user cancels."""
-        suggested = "mosaic.png"
+        """The file to save to: <guide name>_mosaic in the output folder.
+
+        Never overwrites - a repeat run gets a numbered name instead.
+        """
+        stem = "mosaic"
         if self.guide_image_path:
             stem = os.path.splitext(os.path.basename(self.guide_image_path))[0]
-            suggested = f"{stem}_mosaic.png"
-
-        path, _ = QFileDialog.getSaveFileName(
-            self,
-            "Save Mosaic As",
-            suggested,
-            "PNG Image (*.png);;JPEG Image (*.jpg);;TIFF Image (*.tif)"
-        )
-        return path or None
+            stem = f"{stem}_mosaic"
+        ext = self.output_format_combo.currentData()
+        return unique_path(self.output_folder, stem, ext)
 
     def generate_mosaic(self):
         """Validate, pick an output path, and start the worker thread."""
@@ -529,13 +597,20 @@ class MosaicApp(QMainWindow):
     def on_render_finished(self, output_path: str, stats):
         self._teardown_worker()
         self.hide_progress()
-        QMessageBox.information(
-            self, "Mosaic complete",
-            f"Saved to:\n{output_path}\n\n"
+        self.show_result(
+            output_path,
             f"{stats.total_cells:,} tiles placed, "
-            f"{stats.distinct_tiles:,} distinct images used.\n"
+            f"{stats.distinct_tiles:,} distinct images used. "
             f"Most-used image appears {stats.max_tile_uses:,} times."
         )
+
+    def show_result(self, output_path: str, summary: str):
+        """Open the finished mosaic in its own window for inspection.
+
+        Modeless, so the main window stays usable while it is open.
+        """
+        self.result_viewer = ResultViewer(output_path, summary, self)
+        self.result_viewer.show()
 
     def on_render_failed(self, message: str):
         self._teardown_worker()
