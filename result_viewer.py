@@ -1,26 +1,33 @@
 """
 Result Viewer Module
 
-A window that shows the finished mosaic so it can be inspected up close.
+Zoomable views for the main window's canvas: the guide photo with the tile
+grid drawn over it, and the finished mosaic.
 
 A mosaic is only interesting at two scales: from across the room, where the
 guide image appears, and nose-to-the-glass, where the individual photos do.
-The viewer opens fitted to the window and zooms with the mouse wheel down to
+Both views open fitted to the space and zoom with the mouse wheel down to
 actual pixels, panning by drag.
 """
 
+import math
 import os
 
 from PyQt6.QtCore import Qt, QUrl
-from PyQt6.QtGui import QDesktopServices, QImageReader, QPainter, QPixmap
-from PyQt6.QtWidgets import (QDialog, QGraphicsPixmapItem, QGraphicsScene,
+from PyQt6.QtGui import (QColor, QDesktopServices, QImageReader, QPainter,
+                         QPen, QPixmap, QTransform)
+from PyQt6.QtWidgets import (QGraphicsPixmapItem, QGraphicsScene,
                              QGraphicsView, QHBoxLayout, QLabel, QPushButton,
-                             QVBoxLayout)
+                             QStackedWidget, QVBoxLayout, QWidget)
 
 # Wheel step and the zoom range it is clamped to, as a scale factor where
 # 1.0 is one image pixel per screen pixel.
 ZOOM_STEP = 1.25
 MAX_ZOOM = 8.0
+
+# Grid lines closer together than this on screen blur into a flat tint, so
+# below it only the outline is drawn.
+MIN_GRID_SPACING_PX = 4
 
 
 def load_pixmap(path: str) -> QPixmap:
@@ -41,10 +48,10 @@ def load_pixmap(path: str) -> QPixmap:
 class ZoomableImageView(QGraphicsView):
     """A QGraphicsView that zooms under the cursor and pans by drag."""
 
-    def __init__(self, pixmap: QPixmap, parent=None):
+    def __init__(self, pixmap: QPixmap = None, parent=None):
         super().__init__(parent)
         self.setScene(QGraphicsScene(self))
-        self.item = QGraphicsPixmapItem(pixmap)
+        self.item = QGraphicsPixmapItem()
         self.item.setTransformationMode(Qt.TransformationMode.SmoothTransformation)
         self.scene().addItem(self.item)
 
@@ -54,6 +61,23 @@ class ZoomableImageView(QGraphicsView):
         self.setBackgroundBrush(Qt.GlobalColor.darkGray)
         # Stays in "fit" mode, refitting on resize, until the user zooms.
         self._fitted = True
+        if pixmap is not None:
+            self.set_pixmap(pixmap)
+
+    def set_pixmap(self, pixmap: QPixmap, size=None) -> None:
+        """Show pixmap, stretched to size (width, height) in scene units.
+
+        Without a size the pixmap is shown at its own dimensions.
+        """
+        self.item.setPixmap(pixmap)
+        transform = QTransform()
+        if size is not None and not pixmap.isNull():
+            transform = QTransform.fromScale(size[0] / pixmap.width(),
+                                             size[1] / pixmap.height())
+        self.item.setTransform(transform)
+        # The scene only ever grows on its own; pin it to the new image.
+        self.scene().setSceneRect(self.item.sceneBoundingRect())
+        self.fit()
 
     @property
     def zoom(self) -> float:
@@ -61,7 +85,7 @@ class ZoomableImageView(QGraphicsView):
 
     def min_zoom(self) -> float:
         """The zoom at which the whole image fits; never zoom out past it."""
-        rect = self.item.boundingRect()
+        rect = self.item.sceneBoundingRect()
         if rect.isEmpty():
             return 1.0
         viewport = self.viewport().rect()
@@ -95,62 +119,151 @@ class ZoomableImageView(QGraphicsView):
             self.fit()
 
 
-class ResultViewer(QDialog):
-    """Shows a finished mosaic with its summary until the user closes it."""
+class GridPreview(ZoomableImageView):
+    """The guide photo as the renderer sees it, with the tile grid on top.
 
-    def __init__(self, image_path: str, summary: str = "", parent=None):
+    Scene units are output pixels. The photo is stretched over the whole
+    grid, exactly as GuideImage stretches it before cutting cells, so what
+    lands in each drawn cell here is what that cell is matched against.
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent=parent)
+        self.cols = 0
+        self.rows = 0
+        self.tile_width = 0
+        self.tile_height = 0
+        self.show_grid = True
+        self._photo = QPixmap()
+
+    def set_photo(self, pixmap: QPixmap) -> None:
+        self._photo = pixmap
+        self._refresh()
+
+    def set_grid(self, cols: int, rows: int,
+                 tile_width: int, tile_height: int) -> None:
+        self.cols, self.rows = cols, rows
+        self.tile_width, self.tile_height = tile_width, tile_height
+        self._refresh()
+
+    def set_show_grid(self, show: bool) -> None:
+        self.show_grid = show
+        self.viewport().update()
+
+    def _refresh(self) -> None:
+        if self._photo.isNull() or not (self.cols and self.rows):
+            self.set_pixmap(self._photo)
+        else:
+            self.set_pixmap(self._photo, (self.cols * self.tile_width,
+                                          self.rows * self.tile_height))
+        self.viewport().update()
+
+    def drawForeground(self, painter, rect):
+        if (not self.show_grid or self._photo.isNull()
+                or not (self.cols and self.rows)):
+            return
+        width = self.cols * self.tile_width
+        height = self.rows * self.tile_height
+
+        pen = QPen(QColor(255, 255, 255, 110))
+        pen.setCosmetic(True)  # one screen pixel wide at any zoom
+        painter.setPen(pen)
+
+        spacing = min(self.tile_width, self.tile_height) * self.zoom
+        if spacing >= MIN_GRID_SPACING_PX:
+            # Only the lines inside the exposed area; a fine grid on a large
+            # print can run to thousands.
+            first_col = max(1, math.floor(rect.left() / self.tile_width))
+            last_col = min(self.cols - 1, math.ceil(rect.right() / self.tile_width))
+            for c in range(first_col, last_col + 1):
+                x = c * self.tile_width
+                painter.drawLine(x, 0, x, height)
+            first_row = max(1, math.floor(rect.top() / self.tile_height))
+            last_row = min(self.rows - 1, math.ceil(rect.bottom() / self.tile_height))
+            for r in range(first_row, last_row + 1):
+                y = r * self.tile_height
+                painter.drawLine(0, y, width, y)
+
+        painter.drawRect(0, 0, width, height)
+
+
+class ResultPanel(QWidget):
+    """Shows the finished mosaic with its summary and file actions."""
+
+    def __init__(self, parent=None):
         super().__init__(parent)
-        self.image_path = image_path
-        self.setWindowTitle(f"Mosaic - {os.path.basename(image_path)}")
-        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
-        self.resize(900, 900)
+        self.image_path = None
+        # The view while an image is showing, else None.
+        self.view = None
 
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
 
+        self._view = ZoomableImageView(parent=self)
+        self._message = QLabel("Generate a mosaic to see it here.")
+        self._message.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._message.setWordWrap(True)
+        self._stack = QStackedWidget()
+        self._stack.addWidget(self._message)
+        self._stack.addWidget(self._view)
+        layout.addWidget(self._stack, 1)
+
+        self.info_label = QLabel()
+        self.info_label.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.info_label.setWordWrap(True)
+        self.info_label.setContentsMargins(8, 4, 8, 0)
+        self.info_label.hide()
+        layout.addWidget(self.info_label)
+
+        buttons = QHBoxLayout()
+        buttons.setContentsMargins(8, 4, 8, 4)
+        self.fit_btn = QPushButton("Fit")
+        self.fit_btn.clicked.connect(self._view.fit)
+        buttons.addWidget(self.fit_btn)
+
+        self.actual_btn = QPushButton("100%")
+        self.actual_btn.setToolTip("One mosaic pixel per screen pixel")
+        self.actual_btn.clicked.connect(self._view.actual_size)
+        buttons.addWidget(self.actual_btn)
+
+        hint = QLabel("Scroll to zoom, drag to pan")
+        hint.setEnabled(False)  # palette-aware secondary text
+        buttons.addWidget(hint)
+        buttons.addStretch()
+
+        self.folder_btn = QPushButton("Open Folder")
+        self.folder_btn.clicked.connect(self.open_folder)
+        buttons.addWidget(self.folder_btn)
+        layout.addLayout(buttons)
+
+        self._set_controls_enabled(False)
+
+    def show_result(self, image_path: str, summary: str = "") -> None:
+        self.image_path = image_path
         pixmap = load_pixmap(image_path)
         if pixmap.isNull():
             self.view = None
-            message = QLabel(f"The mosaic was saved, but could not be "
-                             f"displayed:\n{image_path}")
-            message.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            layout.addWidget(message, 1)
+            self._message.setText(f"The mosaic was saved, but could not be "
+                                  f"displayed:\n{image_path}")
+            self._stack.setCurrentWidget(self._message)
         else:
-            self.view = ZoomableImageView(pixmap, self)
-            layout.addWidget(self.view, 1)
+            self.view = self._view
+            self._view.set_pixmap(pixmap)
+            self._stack.setCurrentWidget(self._view)
 
-        info = QLabel(f"Saved to: {image_path}"
-                      + (f"\n{summary}" if summary else ""))
-        info.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        info.setWordWrap(True)
-        layout.addWidget(info)
+        self.info_label.setText(f"Saved to: {image_path}"
+                                + (f"\n{summary}" if summary else ""))
+        self.info_label.show()
+        self._set_controls_enabled(self.view is not None)
+        self.folder_btn.setEnabled(True)
 
-        buttons = QHBoxLayout()
-        if self.view is not None:
-            fit_btn = QPushButton("Fit to Window")
-            fit_btn.clicked.connect(self.view.fit)
-            buttons.addWidget(fit_btn)
-
-            actual_btn = QPushButton("Actual Size")
-            actual_btn.clicked.connect(self.view.actual_size)
-            buttons.addWidget(actual_btn)
-
-            hint = QLabel("Scroll to zoom, drag to pan")
-            hint.setEnabled(False)  # palette-aware secondary text
-            buttons.addWidget(hint)
-
-        buttons.addStretch()
-
-        folder_btn = QPushButton("Open Folder")
-        folder_btn.clicked.connect(self.open_folder)
-        buttons.addWidget(folder_btn)
-
-        close_btn = QPushButton("Close")
-        close_btn.setDefault(True)
-        close_btn.clicked.connect(self.accept)
-        buttons.addWidget(close_btn)
-
-        layout.addLayout(buttons)
+    def _set_controls_enabled(self, enabled: bool) -> None:
+        for btn in (self.fit_btn, self.actual_btn, self.folder_btn):
+            btn.setEnabled(enabled)
 
     def open_folder(self) -> None:
+        if not self.image_path:
+            return
         folder = os.path.dirname(os.path.abspath(self.image_path))
         QDesktopServices.openUrl(QUrl.fromLocalFile(folder))

@@ -28,7 +28,7 @@ through it.
 | `mosaic_renderer.py` | Chooses a tile per cell, then composites |
 | `mosaic_worker.py` | Runs the pipeline off the GUI thread |
 | `mosaic_app.py` | PyQt6 user interface |
-| `result_viewer.py` | Zoomable window showing the finished mosaic |
+| `result_viewer.py` | Zoomable canvas views: photo with tile grid, and the finished mosaic |
 
 ## Installation
 

@@ -31,6 +31,57 @@ DEFAULT_IMAGE_EXTENSIONS = (
 )
 
 
+def find_tile_files(folder_path: str,
+                    extensions: Optional[List[str]] = None,
+                    recursive: bool = False) -> List[str]:
+    """
+    List the tile image files in a folder without loading them.
+
+    Enumerating separately lets a caller show a total before the slow
+    per-image analysis starts.
+
+    Args:
+        folder_path: Path to folder containing tile images
+        extensions: File extensions to include (e.g., ['.png', '.jpg']).
+                   If None, defaults to common image formats
+        recursive: If True, also scan subdirectories
+
+    Returns:
+        Sorted list of file paths
+
+    Raises:
+        FileNotFoundError: If folder doesn't exist
+        ValueError: If path is not a directory
+    """
+    if not os.path.exists(folder_path):
+        raise FileNotFoundError(f"Folder not found: {folder_path}")
+
+    if not os.path.isdir(folder_path):
+        raise ValueError(f"Path is not a directory: {folder_path}")
+
+    if extensions is None:
+        extensions = list(DEFAULT_IMAGE_EXTENSIONS)
+
+    # Convert extensions to lowercase for case-insensitive matching
+    extensions = [ext.lower() for ext in extensions]
+
+    paths = []
+    if recursive:
+        for root, dirs, files in os.walk(folder_path):
+            for filename in files:
+                if os.path.splitext(filename)[1].lower() in extensions:
+                    paths.append(os.path.join(root, filename))
+    else:
+        for filename in os.listdir(folder_path):
+            file_path = os.path.join(folder_path, filename)
+            if not os.path.isfile(file_path):
+                continue
+            if os.path.splitext(filename)[1].lower() in extensions:
+                paths.append(file_path)
+
+    return sorted(paths)
+
+
 @dataclass
 class SearchResult:
     """Represents a search result with the tile and its distance."""
@@ -107,52 +158,8 @@ class TileDatabase:
     def find_tile_files(self, folder_path: str,
                         extensions: Optional[List[str]] = None,
                         recursive: bool = False) -> List[str]:
-        """
-        List the tile image files in a folder without loading them.
-
-        Enumerating separately lets a caller show a total before the slow
-        per-image analysis starts.
-
-        Args:
-            folder_path: Path to folder containing tile images
-            extensions: File extensions to include (e.g., ['.png', '.jpg']).
-                       If None, defaults to common image formats
-            recursive: If True, also scan subdirectories
-
-        Returns:
-            Sorted list of file paths
-
-        Raises:
-            FileNotFoundError: If folder doesn't exist
-            ValueError: If path is not a directory
-        """
-        if not os.path.exists(folder_path):
-            raise FileNotFoundError(f"Folder not found: {folder_path}")
-
-        if not os.path.isdir(folder_path):
-            raise ValueError(f"Path is not a directory: {folder_path}")
-
-        if extensions is None:
-            extensions = list(DEFAULT_IMAGE_EXTENSIONS)
-
-        # Convert extensions to lowercase for case-insensitive matching
-        extensions = [ext.lower() for ext in extensions]
-
-        paths = []
-        if recursive:
-            for root, dirs, files in os.walk(folder_path):
-                for filename in files:
-                    if os.path.splitext(filename)[1].lower() in extensions:
-                        paths.append(os.path.join(root, filename))
-        else:
-            for filename in os.listdir(folder_path):
-                file_path = os.path.join(folder_path, filename)
-                if not os.path.isfile(file_path):
-                    continue
-                if os.path.splitext(filename)[1].lower() in extensions:
-                    paths.append(file_path)
-
-        return sorted(paths)
+        """See the module-level find_tile_files."""
+        return find_tile_files(folder_path, extensions, recursive)
 
     def load_tiles_from_folder(self, folder_path: str,
                                extensions: Optional[List[str]] = None,

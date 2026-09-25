@@ -14,8 +14,8 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PyQt6.QtCore import QThread, QStandardPaths, QSettings
 from PyQt6.QtWidgets import QApplication, QFileDialog, QMessageBox
 
-from mosaic_app import MosaicApp
-from result_viewer import ResultViewer
+from mosaic_app import LOOK_PRESETS, PRINT_SIZES, MosaicApp
+from result_viewer import ResultPanel
 from tile_preprocessor import PreprocessorConfig
 
 
@@ -206,7 +206,7 @@ class TestExistingControls:
         assert window.generate_btn.isEnabled() is True
 
     def test_progress_starts_hidden(self, window):
-        assert window.progress_group.isHidden() is True
+        assert window.progress_widget.isHidden() is True
 
 
 # ============================================================================
@@ -267,8 +267,8 @@ class TestJobSnapshot:
         assert job.min_reuse_distance == 3
 
     def test_captures_variety_tint_and_order(self, window, tmp_path):
-        window.variety_spinbox.setValue(35)
-        window.tint_spinbox.setValue(20)
+        window.variety_slider.setValue(35)
+        window.tint_slider.setValue(20)
         window.randomize_order_checkbox.setChecked(False)
         job = self._job(window, str(tmp_path))
         assert job.variety == 35
@@ -276,15 +276,15 @@ class TestJobSnapshot:
         assert job.randomize_order is False
 
     def test_variety_and_tint_start_off(self, window, tmp_path):
-        assert window.variety_spinbox.text() == "off"
-        assert window.tint_spinbox.text() == "off"
+        assert window.variety_value_label.text() == "off"
+        assert window.tint_value_label.text() == "off"
         job = self._job(window, str(tmp_path))
         assert job.variety == 0
         assert job.tint_strength == 0
         assert job.randomize_order is True
 
     def test_variety_and_tint_are_bounded(self, window):
-        for box in (window.variety_spinbox, window.tint_spinbox):
+        for box in (window.variety_slider, window.tint_slider):
             assert (box.minimum(), box.maximum()) == (0, 100)
 
     def test_captures_subdirectory_flag(self, window, tmp_path):
@@ -416,7 +416,7 @@ class TestProgressUi:
     def test_hide_progress_restores_idle_state(self, window):
         window.show_progress()
         window.hide_progress()
-        assert window.progress_group.isHidden() is True
+        assert window.progress_widget.isHidden() is True
         assert window.cancel_btn.isHidden() is True
         assert window.progress_status_label.text() == "Ready"
 
@@ -490,18 +490,18 @@ class TestWorkerLifecycle:
         self._start(window, monkeypatch, str(tmp_path))
         self._drain(window, qapp)
 
-        assert window.progress_group.isHidden() is True
+        assert window.progress_widget.isHidden() is True
         assert window.generate_btn.isEnabled() is True
 
-    def test_result_window_opens_on_success(self, window, monkeypatch, qapp, tmp_path):
+    def test_result_opens_in_the_mosaic_tab(self, window, monkeypatch, qapp, tmp_path):
         output = self._start(window, monkeypatch, str(tmp_path))
         self._drain(window, qapp)
 
-        assert isinstance(window.result_viewer, ResultViewer)
-        assert window.result_viewer.isVisible()
-        assert window.result_viewer.image_path == output
-        assert window.result_viewer.view is not None
-        window.result_viewer.close()
+        assert isinstance(window.result_panel, ResultPanel)
+        assert window.canvas_tabs.isTabEnabled(1)
+        assert window.canvas_tabs.currentWidget() is window.result_panel
+        assert window.result_panel.image_path == output
+        assert window.result_panel.view is not None
 
     def test_cancel_button_stops_the_run(self, window, monkeypatch, qapp, tmp_path):
         self._start(window, monkeypatch, str(tmp_path))
@@ -517,3 +517,237 @@ class TestWorkerLifecycle:
 
         assert window.worker is None
         assert window.worker_thread is None
+
+
+# ============================================================================
+# Print size presets
+# ============================================================================
+
+class TestPrintSize:
+
+    def test_default_is_a_preset_with_fields_hidden(self, window):
+        assert window.print_size_combo.currentData() == (20, 30)
+        assert window.custom_print_row.isHidden() is True
+
+    def test_choosing_a_preset_sets_the_inches(self, window):
+        window.print_size_combo.setCurrentIndex(
+            PRINT_SIZES.index((16, 20)))
+        assert (window.output_width_inches, window.output_height_inches) == (16, 20)
+        assert window.total_tiles == (16 * 300 // 100) * (20 * 300 // 100)
+
+    def test_preset_keeps_landscape_orientation(self, window):
+        window.swap_orientation()
+        window.print_size_combo.setCurrentIndex(
+            PRINT_SIZES.index((8, 10)))
+        assert (window.output_width_inches, window.output_height_inches) == (10, 8)
+
+    def test_swap_orientation(self, window):
+        window.swap_orientation()
+        assert (window.output_width_inches, window.output_height_inches) == (30, 20)
+        assert window.print_size_combo.currentData() == (20, 30)
+        assert "landscape" in window.output_dimensions_label.text()
+
+    def test_unmatched_size_switches_to_custom(self, window):
+        configure(window, 10, 8, 100, 100)
+        assert window.print_size_combo.currentData() is None
+        assert window.custom_print_row.isHidden() is False
+
+    def test_custom_stays_open_while_typing_a_preset_size(self, window):
+        window.print_size_combo.setCurrentIndex(
+            window.print_size_combo.count() - 1)
+        window.width_spinbox.setValue(16)
+        window.height_spinbox.setValue(20)
+        assert window.print_size_combo.currentData() is None
+        assert window.custom_print_row.isHidden() is False
+
+
+# ============================================================================
+# Tile shape buttons
+# ============================================================================
+
+class TestTileShape:
+
+    def test_square_by_default(self, window):
+        assert window.tile_shape_group.checkedId() == 0
+        assert window.custom_tile_row.isHidden() is True
+
+    def test_width_drives_height_for_a_fixed_shape(self, window):
+        window.tile_width_spinbox.setValue(80)
+        assert window.tile_height == 80
+
+    def test_choosing_a_shape_derives_height(self, window):
+        window.tile_shape_buttons[1].click()     # 4:3
+        assert (window.tile_width, window.tile_height) == (100, 75)
+        window.tile_width_spinbox.setValue(120)
+        assert window.tile_height == 90
+
+    def test_setting_height_selects_the_matching_shape(self, window):
+        configure(window, 20, 30, 120, 80)
+        assert window.tile_shape_group.checkedId() == 2    # 3:2
+        assert window.custom_tile_row.isHidden() is True
+
+    def test_odd_height_switches_to_custom(self, window):
+        window.tile_height_spinbox.setValue(37)
+        assert window.tile_shape_buttons[-1].isChecked()
+        assert window.custom_tile_row.isHidden() is False
+        window.tile_width_spinbox.setValue(50)
+        assert window.tile_height == 37             # custom: width is free
+
+    def test_custom_button_reveals_height(self, window):
+        window.tile_shape_buttons[-1].click()
+        assert window.custom_tile_row.isHidden() is False
+        assert window.tile_size_label.text() == "Width"
+
+
+# ============================================================================
+# Look presets
+# ============================================================================
+
+class TestLookPresets:
+
+    def test_starts_on_accurate(self, window):
+        assert window.current_look_preset() == "Accurate"
+        assert window.look_buttons["Accurate"].isChecked()
+
+    @pytest.mark.parametrize("name", list(LOOK_PRESETS))
+    def test_preset_sets_every_control(self, window, tmp_path, name):
+        window.randomize_order_checkbox.setChecked(False)
+        window.look_buttons[name].click()
+        values = LOOK_PRESETS[name]
+        window.guide_image_path = "guide.png"
+        window.tile_folder_path = "tiles"
+        job = window.build_job(str(tmp_path / "out.png"))
+        assert job.variety == values["variety"]
+        assert job.tint_strength == values["tint"]
+        assert job.min_reuse_distance == values["min_gap"]
+        assert job.max_tile_reuse == values["max_uses"]
+        assert job.randomize_order is True
+        assert window.look_buttons[name].isChecked()
+
+    def test_nudging_a_control_shows_custom(self, window):
+        window.look_buttons["Balanced"].click()
+        window.variety_slider.setValue(31)
+        assert window.current_look_preset() is None
+        assert not any(b.isChecked() for b in window.look_buttons.values())
+        assert window.look_custom_label.text() == "Custom"
+
+    def test_returning_to_preset_values_reselects_it(self, window):
+        window.variety_slider.setValue(30)
+        window.tint_slider.setValue(15)
+        window.min_distance_spinbox.setValue(2)
+        assert window.look_buttons["Balanced"].isChecked()
+        assert window.look_custom_label.text() == ""
+
+    def test_advanced_starts_collapsed(self, window):
+        assert window.advanced_panel.isHidden() is True
+        window.advanced_toggle.setChecked(True)
+        assert window.advanced_panel.isHidden() is False
+
+
+# ============================================================================
+# Photo, tile folder and the reason Generate is disabled
+# ============================================================================
+
+class TestInputs:
+
+    def test_hint_names_what_is_missing(self, window):
+        assert "photo and a folder" in window.generate_hint_label.text()
+        window.guide_image_path = "guide.png"
+        window.check_ready_to_generate()
+        assert "folder" in window.generate_hint_label.text()
+        window.tile_folder_path = "tiles"
+        window.check_ready_to_generate()
+        assert window.generate_hint_label.isHidden() is True
+
+    def test_no_tiles_fit_disables_generate(self, window):
+        window.guide_image_path = "guide.png"
+        window.tile_folder_path = "tiles"
+        configure(window, 1, 1, 400, 400)
+        assert window.generate_btn.isEnabled() is False
+        assert "smaller" in window.generate_hint_label.text()
+
+    def test_tile_folder_is_counted(self, window, tmp_path):
+        for name in ("a.jpg", "b.PNG", "notes.txt"):
+            (tmp_path / name).touch()
+        (tmp_path / "sub").mkdir()
+        (tmp_path / "sub" / "c.jpg").touch()
+
+        window.set_tile_folder(str(tmp_path))
+        assert window.tile_count == 2
+        assert "2 found" in window.tiles_status_label.text()
+
+        window.subdirs_checkbox.setChecked(True)
+        assert window.tile_count == 3
+
+    def test_empty_tile_folder_blocks_generate(self, window, tmp_path):
+        window.guide_image_path = "guide.png"
+        window.set_tile_folder(str(tmp_path))
+        assert window.tile_count == 0
+        assert window.generate_btn.isEnabled() is False
+        assert "No images" in window.generate_hint_label.text()
+
+    def test_missing_tile_folder_is_reported(self, window, tmp_path):
+        window.set_tile_folder(str(tmp_path / "gone"))
+        assert window.tile_count is None
+        assert "not found" in window.tiles_status_label.text()
+
+    def test_set_guide_image_shows_it(self, window, tmp_path):
+        path = tmp_path / "sunset.jpg"
+        Image.new('RGB', (400, 300), (250, 120, 60)).save(path)
+        assert window.set_guide_image(str(path)) is True
+        assert window.guide_image_path == str(path)
+        assert "400 × 300" in window.guide_size_label.text()
+        assert window.preview_stack.currentWidget() is window.grid_preview
+        assert window.output_name_label.text() == "sunset_mosaic.png"
+
+    def test_unreadable_guide_is_rejected(self, window, tmp_path, monkeypatch):
+        path = tmp_path / "broken.jpg"
+        path.write_bytes(b"not an image")
+        warned = []
+        monkeypatch.setattr(QMessageBox, 'warning',
+                            lambda *a, **k: warned.append(a))
+        assert window.set_guide_image(str(path)) is False
+        assert warned
+        assert window.guide_image_path is None
+
+    def test_output_name_follows_format(self, window):
+        window.output_format_combo.setCurrentIndex(
+            window.output_format_combo.findData(".tif"))
+        assert window.output_name_label.text() == "mosaic.tif"
+
+    def test_grid_preview_tracks_the_size_controls(self, window):
+        configure(window, 20, 30, 120, 80)
+        assert (window.grid_preview.cols, window.grid_preview.rows) == (50, 112)
+
+
+class TestStretchWarning:
+
+    def _guide(self, window, tmp_path, size):
+        path = tmp_path / "guide.png"
+        Image.new('RGB', size, (0, 0, 0)).save(path)
+        window.set_guide_image(str(path))
+
+    def test_matching_shape_has_no_warning(self, window, tmp_path):
+        self._guide(window, tmp_path, (200, 300))       # 2:3, like 20x30
+        assert window.photo_stretch == pytest.approx(1.0)
+        assert window.stretch_label.isHidden() is True
+
+    def test_wide_photo_on_tall_print_warns(self, window, tmp_path):
+        self._guide(window, tmp_path, (300, 200))
+        assert window.photo_stretch < 1
+        assert window.stretch_label.isHidden() is False
+        assert "taller by 125%" in window.stretch_label.text()
+
+    def test_swapping_orientation_clears_it(self, window, tmp_path):
+        self._guide(window, tmp_path, (300, 200))
+        window.swap_orientation()
+        assert window.stretch_label.isHidden() is True
+
+    def test_no_photo_no_warning(self, window):
+        assert window.photo_stretch is None
+        assert window.stretch_label.isHidden() is True
+
+    def test_preview_controls_wait_for_a_photo(self, window, tmp_path):
+        assert window.preview_controls.isEnabled() is False
+        self._guide(window, tmp_path, (200, 300))
+        assert window.preview_controls.isEnabled() is True

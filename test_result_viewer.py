@@ -1,5 +1,5 @@
 """
-Tests for the ResultViewer window that shows a finished mosaic.
+Tests for the canvas views: the finished mosaic panel and the grid preview.
 """
 
 import os
@@ -10,9 +10,10 @@ from PIL import Image
 # Qt needs an offscreen platform plugin under CI / headless runs.
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+from PyQt6.QtGui import QPixmap
 from PyQt6.QtWidgets import QApplication
 
-from result_viewer import MAX_ZOOM, ResultViewer, load_pixmap
+from result_viewer import GridPreview, MAX_ZOOM, ResultPanel, load_pixmap
 
 
 @pytest.fixture(scope="session")
@@ -30,8 +31,10 @@ def image_path(tmp_path):
 
 @pytest.fixture
 def viewer(qapp, image_path):
-    v = ResultViewer(image_path, "9 tiles placed")
+    v = ResultPanel()
+    v.resize(900, 900)
     v.show()
+    v.show_result(image_path, "9 tiles placed")
     qapp.processEvents()
     yield v
     v.close()
@@ -75,11 +78,78 @@ def test_actual_size_is_one_to_one(viewer):
 
 
 def test_unreadable_image_shows_a_message(qapp, tmp_path):
-    v = ResultViewer(str(tmp_path / "missing.png"))
+    v = ResultPanel()
+    v.show_result(str(tmp_path / "missing.png"))
     assert v.view is None
+    assert v.fit_btn.isEnabled() is False
     v.close()
 
 
-def test_close_dismisses(viewer):
-    viewer.accept()
-    assert not viewer.isVisible()
+def test_summary_is_shown(viewer, image_path):
+    text = viewer.info_label.text()
+    assert image_path in text and "9 tiles placed" in text
+
+
+def test_empty_panel_has_nothing_to_act_on(qapp):
+    v = ResultPanel()
+    assert v.view is None
+    assert v.folder_btn.isEnabled() is False
+    v.close()
+
+
+def test_a_second_result_replaces_the_first(viewer, tmp_path, qapp):
+    other = tmp_path / "second.png"
+    Image.new('RGB', (300, 600), (0, 0, 0)).save(other)
+    viewer.show_result(str(other))
+    qapp.processEvents()
+    rect = viewer.view.sceneRect()
+    assert (rect.width(), rect.height()) == (300, 600)
+
+
+# ============================================================================
+# Grid preview
+# ============================================================================
+
+@pytest.fixture
+def preview(qapp):
+    p = GridPreview()
+    p.resize(600, 600)
+    p.show()
+    qapp.processEvents()
+    yield p
+    p.close()
+
+
+def test_photo_is_stretched_over_the_whole_grid(preview):
+    """GuideImage stretches the guide to the grid, so the preview must too."""
+    photo = QPixmap(400, 300)
+    preview.set_photo(photo)
+    preview.set_grid(60, 90, 100, 100)
+    rect = preview.item.sceneBoundingRect()
+    assert (rect.width(), rect.height()) == (6000, 9000)
+
+
+def test_grid_change_rescales_the_photo(preview):
+    preview.set_photo(QPixmap(400, 300))
+    preview.set_grid(60, 90, 100, 100)
+    preview.set_grid(50, 112, 120, 80)
+    rect = preview.item.sceneBoundingRect()
+    assert (rect.width(), rect.height()) == (6000, 8960)
+
+
+def test_preview_stays_fitted(preview):
+    preview.set_photo(QPixmap(400, 300))
+    preview.set_grid(60, 90, 100, 100)
+    assert preview.zoom == pytest.approx(preview.min_zoom(), rel=0.02)
+
+
+def test_empty_grid_shows_the_photo_as_is(preview):
+    preview.set_photo(QPixmap(400, 300))
+    preview.set_grid(0, 0, 400, 400)
+    rect = preview.item.sceneBoundingRect()
+    assert (rect.width(), rect.height()) == (400, 300)
+
+
+def test_grid_can_be_hidden(preview):
+    preview.set_show_grid(False)
+    assert preview.show_grid is False

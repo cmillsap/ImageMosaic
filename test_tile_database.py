@@ -564,5 +564,14 @@ class TestDifferentAlgorithms:
         assert all(c.r == 255 for c in colors)
 
 
+def test_module_level_find_tile_files_matches_method(tmp_path):
+    from tile_database import TileDatabase, find_tile_files
+    for name in ("a.jpg", "b.heic", "c.txt"):
+        (tmp_path / name).touch()
+    expected = [str(tmp_path / "a.jpg"), str(tmp_path / "b.heic")]
+    assert find_tile_files(str(tmp_path)) == expected
+    assert TileDatabase().find_tile_files(str(tmp_path)) == expected
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
