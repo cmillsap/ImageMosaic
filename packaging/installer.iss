@@ -9,7 +9,7 @@
 ; packaging\build.ps1 does both.
 
 #define AppName "Image Mosaic Generator"
-#define AppVersion "1.3.0"
+#define AppVersion "1.3.1"
 #define AppPublisher "Chris Millsap"
 #define AppExeName "ImageMosaic.exe"
 #define SourceDir "..\dist\ImageMosaic"
