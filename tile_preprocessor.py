@@ -32,6 +32,12 @@ logger = logging.getLogger(__name__)
 # Fallback score used when a detector cannot report a real confidence.
 DEFAULT_FACE_CONFIDENCE = 1.0
 
+# Part of every cache key. Bump it whenever a change alters what
+# preprocessing produces, so entries made by older code are not reused.
+# 2: EXIF orientation applied (older entries of rotated phone photos are
+#    sideways).
+CACHE_VERSION = 2
+
 
 @dataclass
 class CropRegion:
@@ -394,7 +400,8 @@ class TilePreprocessorCache:
         """
         abs_path = os.path.abspath(image_path)
         mtime = os.path.getmtime(abs_path)
-        key_string = f"{abs_path}:{mtime}:{target_size[0]}x{target_size[1]}"
+        key_string = (f"{CACHE_VERSION}:{abs_path}:{mtime}:"
+                      f"{target_size[0]}x{target_size[1]}")
         return hashlib.md5(key_string.encode()).hexdigest()
 
     def _get_cache_path(self, cache_key: str) -> str:
@@ -495,14 +502,13 @@ class TilePreprocessor:
 
         try:
             # Load and convert image
-            with open_image(image_path) as img:
-                # Ask the decoder for a reduced-scale image. For JPEG this
-                # makes libjpeg decode at 1/2, 1/4 or 1/8 scale in the DCT
-                # domain, which is far cheaper than decoding 18 megapixels
-                # only to throw most of them away below. It is a no-op for
-                # formats that cannot do it.
-                max_dim = self.config.max_dimension_before_rescale
-                img.draft('RGB', (max_dim, max_dim))
+            # Ask the decoder for a reduced-scale image. For JPEG this
+            # makes libjpeg decode at 1/2, 1/4 or 1/8 scale in the DCT
+            # domain, which is far cheaper than decoding 18 megapixels
+            # only to throw most of them away below. It is a no-op for
+            # formats that cannot do it.
+            max_dim = self.config.max_dimension_before_rescale
+            with open_image(image_path, draft_size=(max_dim, max_dim)) as img:
 
                 if img.mode != 'RGB':
                     img = img.convert('RGB')

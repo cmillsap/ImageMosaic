@@ -12,14 +12,16 @@ import shutil
 import tempfile
 
 import pytest
-from PIL import Image
+from PIL import ExifTags, Image
 
 from guide_image import GuideImage
 from image_io import open_image
 from tile_analyzer import ImageTileAnalyzer
 from tile_database import TileDatabase
 import tile_loader
-from tile_preprocessor import PreprocessorConfig, TilePreprocessor
+import tile_preprocessor
+from tile_preprocessor import (PreprocessorConfig, TilePreprocessor,
+                               TilePreprocessorCache)
 
 HERE = os.path.dirname(__file__)
 HEIC_PHOTO = os.path.join(HERE, 'test.HEIC')
@@ -38,6 +40,25 @@ both_photos = pytest.mark.parametrize("path", [
     pytest.param(HEIC_PHOTO, marks=requires_heic, id="heic"),
     pytest.param(DNG_PHOTO, marks=requires_dng, id="dng"),
 ])
+
+
+RED = (255, 0, 0)
+BLUE = (0, 0, 255)
+
+
+def _save_oriented_jpeg(path, orientation, size=(40, 20)):
+    """A JPEG stored wide, left half red and right half blue, tagged with
+    the given EXIF Orientation, the way a phone saves a sideways shot."""
+    w, h = size
+    img = Image.new('RGB', size, BLUE)
+    img.paste(RED, (0, 0, w // 2, h))
+    exif = Image.Exif()
+    exif[ExifTags.Base.Orientation] = orientation
+    img.save(path, 'JPEG', quality=95, exif=exif)
+
+
+def _is_close(pixel, colour, tolerance=40):
+    return all(abs(a - b) <= tolerance for a, b in zip(pixel, colour))
 
 
 @pytest.fixture
@@ -97,6 +118,88 @@ class TestOpenImage:
         r, g, b = [sum(c) / len(c) for c in zip(*small.getdata())]
         assert 30 < (r + g + b) / 3 < 225
         assert max(r, g, b) - min(r, g, b) < 60
+
+
+class TestExifOrientation:
+
+    def test_rotate_90_tag_is_applied(self, temp_dir):
+        """Orientation 6 means "rotate 90 degrees clockwise to display", so
+        the stored left (red) half ends up on top."""
+        path = os.path.join(temp_dir, 'phone.jpg')
+        _save_oriented_jpeg(path, 6)
+        with open_image(path) as img:
+            assert img.size == (20, 40)
+            img = img.convert('RGB')
+            assert _is_close(img.getpixel((10, 5)), RED)
+            assert _is_close(img.getpixel((10, 35)), BLUE)
+
+    def test_rotate_180_tag_is_applied(self, temp_dir):
+        path = os.path.join(temp_dir, 'phone.jpg')
+        _save_oriented_jpeg(path, 3)
+        with open_image(path) as img:
+            assert img.size == (40, 20)
+            assert _is_close(img.convert('RGB').getpixel((35, 10)), RED)
+
+    def test_rotated_result_is_not_rotated_again(self, temp_dir):
+        path = os.path.join(temp_dir, 'phone.jpg')
+        _save_oriented_jpeg(path, 6)
+        with open_image(path) as img:
+            assert img.getexif().get(ExifTags.Base.Orientation, 1) == 1
+
+    def test_upright_image_is_left_lazy(self, temp_dir):
+        """No transpose needed means no copy: the image keeps its format and
+        remains undecoded, so draft() still works for other callers."""
+        path = os.path.join(temp_dir, 'upright.jpg')
+        _save_oriented_jpeg(path, 1)
+        with open_image(path) as img:
+            assert img.format == 'JPEG'
+            assert img.size == (40, 20)
+
+    def test_draft_size_applies_before_rotation(self, temp_dir):
+        """A large JPEG decodes at reduced scale and still comes out
+        rotated; drafting after the transpose would be a no-op."""
+        path = os.path.join(temp_dir, 'big.jpg')
+        _save_oriented_jpeg(path, 6, size=(1600, 800))
+        with open_image(path, draft_size=(200, 200)) as img:
+            assert img.size == (200, 400)
+
+    def test_draft_size_is_ignored_for_png(self, temp_dir):
+        path = os.path.join(temp_dir, 'a.png')
+        Image.new('RGB', (30, 20)).save(path)
+        with open_image(path, draft_size=(5, 5)) as img:
+            assert img.size == (30, 20)
+
+    @requires_heic
+    def test_heic_is_not_rotated_twice(self):
+        """pillow-heif rotates while decoding and resets the tag, so the
+        transpose in open_image must find nothing left to do."""
+        with open_image(HEIC_PHOTO) as img:
+            assert img.getexif().get(ExifTags.Base.Orientation, 1) == 1
+
+    def test_preprocessed_tile_is_upright(self, temp_dir):
+        """Tall tile from a photo stored wide but tagged portrait: the whole
+        (rotated) image fits the tile, red on top."""
+        path = os.path.join(temp_dir, 'phone.jpg')
+        _save_oriented_jpeg(path, 6, size=(400, 200))
+        config = PreprocessorConfig(target_width=20, target_height=40,
+                                    enable_face_detection=False,
+                                    enable_saliency=False,
+                                    cache_dir=os.path.join(temp_dir, 'c'))
+        tile = TilePreprocessor(config).preprocess_image(path)
+        assert tile.size == (20, 40)
+        assert _is_close(tile.getpixel((10, 5)), RED)
+        assert _is_close(tile.getpixel((10, 35)), BLUE)
+
+    def test_cache_key_includes_version(self, temp_dir, monkeypatch):
+        """Entries cached before orientation was applied must not be
+        reused, which relies on the version being part of the key."""
+        path = os.path.join(temp_dir, 'a.png')
+        Image.new('RGB', (10, 10)).save(path)
+        cache = TilePreprocessorCache(os.path.join(temp_dir, 'c'))
+        before = cache._get_cache_key(path, (10, 10))
+        monkeypatch.setattr(tile_preprocessor, 'CACHE_VERSION',
+                            tile_preprocessor.CACHE_VERSION + 1)
+        assert cache._get_cache_key(path, (10, 10)) != before
 
 
 class TestPipelineIntegration:
