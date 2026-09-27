@@ -12,10 +12,12 @@ from PIL import Image
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PyQt6.QtCore import QThread, QStandardPaths, QSettings
-from PyQt6.QtWidgets import QApplication, QFileDialog, QMessageBox, QScrollArea
+from PyQt6.QtWidgets import (QAbstractButton, QApplication, QFileDialog,
+                             QLabel, QMessageBox, QScrollArea)
 
 from mosaic_app import LOOK_PRESETS, PRINT_SIZES, MosaicApp
 from result_viewer import ResultPanel
+from ui_support import HintLabel
 from tile_preprocessor import PreprocessorConfig
 
 
@@ -210,27 +212,103 @@ class TestExistingControls:
 
 
 # ============================================================================
-# The sidebar must never cut off its rightmost controls
+# Large system fonts must never clip or crowd out the controls
 # ============================================================================
 
-class TestSidebarWidth:
+FONT_SIZES = [9, 14, 18]
 
-    @pytest.mark.parametrize("point_size", [9, 11, 14])
+
+def settle(qapp):
+    """Let layout changes finish; a window grows to a new minimum size only
+    on the pass after its contents ask for it."""
+    for _ in range(3):
+        qapp.processEvents()
+
+
+def set_point_size(qapp, window, point_size):
+    """Stand in for the user's system text size, as Windows scaling sets."""
+    font = window.font()
+    font.setPointSize(point_size)
+    window.setFont(font)
+    window.show()
+    settle(qapp)
+
+
+def clipped_text(window):
+    """(type, text) of each visible label or button too small for its text:
+    too narrow for one line, or too short for the lines it wraps to."""
+    clipped = []
+    for widget in window.findChildren((QLabel, QAbstractButton)):
+        if not (widget.isVisible() and widget.text()):
+            continue
+        if isinstance(widget, HintLabel):
+            continue  # Steps aside when it doesn't fit, by design.
+        if isinstance(widget, QLabel) and widget.wordWrap():
+            too_small = widget.height() < widget.heightForWidth(widget.width())
+        else:
+            too_small = widget.width() < widget.sizeHint().width()
+        if too_small:
+            clipped.append((type(widget).__name__, widget.text()))
+    return clipped
+
+
+class TestLargeText:
+
+    @pytest.mark.parametrize("point_size", FONT_SIZES)
     def test_squeezed_sidebar_still_fits_its_settings(self, qapp, window,
                                                       point_size):
-        # Large system fonts widen the rows; dragging the splitter hard
-        # left is the narrowest the user can make the sidebar.
-        font = window.font()
-        font.setPointSize(point_size)
-        window.setFont(font)
-        window.show()
-        qapp.processEvents()
+        # Dragging the splitter hard left is the narrowest the user can
+        # make the sidebar.
+        set_point_size(qapp, window, point_size)
         window.centralWidget().setSizes([0, 5000])
-        qapp.processEvents()
+        settle(qapp)
 
         scroll = window.findChild(QScrollArea)
         assert (scroll.viewport().width()
                 >= scroll.widget().minimumSizeHint().width())
+
+    @pytest.mark.parametrize("point_size", FONT_SIZES)
+    def test_no_text_is_clipped(self, qapp, window, point_size):
+        set_point_size(qapp, window, point_size)
+        # Reveal the rows that start hidden, and the widest slider values.
+        window.advanced_toggle.setChecked(True)
+        window.print_size_combo.setCurrentIndex(
+            window.print_size_combo.count() - 1)
+        window.tile_shape_buttons[-1].click()
+        window.variety_slider.setValue(100)
+        window.tint_slider.setValue(100)
+        settle(qapp)
+        assert clipped_text(window) == []
+
+        window.resize(window.minimumSizeHint())
+        settle(qapp)
+        assert clipped_text(window) == []
+
+    # Screens as (average characters across, lines down) in Segoe UI, so
+    # the budget holds whatever font the test platform substitutes.
+    @pytest.mark.parametrize("point_size, screen", [
+        (9, (160, 33)),    # 960 x 540: 200% display scaling on 1080p
+        (18, (116, 22)),   # 1280 x 720 with Windows text size at 200%
+    ])
+    def test_minimum_window_fits_the_screen(self, qapp, window,
+                                            point_size, screen):
+        set_point_size(qapp, window, point_size)
+        metrics = window.fontMetrics()
+        minimum = window.minimumSizeHint()
+        assert minimum.width() / metrics.averageCharWidth() <= screen[0]
+        assert minimum.height() / metrics.lineSpacing() <= screen[1]
+
+    @pytest.mark.parametrize("point_size", FONT_SIZES)
+    def test_emphasised_text_follows_the_font(self, qapp, window, point_size):
+        set_point_size(qapp, window, point_size)
+        generate = window.generate_btn.font()
+        assert generate.pointSizeF() == pytest.approx(point_size * 1.2)
+        assert generate.bold()
+
+        header = next(label for label in window.findChildren(QLabel)
+                      if label.text() == "PHOTO")
+        assert header.font().pointSizeF() == pytest.approx(point_size * 0.85)
+        assert header.font().bold()
 
 
 # ============================================================================

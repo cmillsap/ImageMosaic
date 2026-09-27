@@ -20,6 +20,8 @@ from PyQt6.QtWidgets import (QGraphicsPixmapItem, QGraphicsScene,
                              QGraphicsView, QHBoxLayout, QLabel, QPushButton,
                              QStackedWidget, QVBoxLayout, QWidget)
 
+from ui_support import HintLabel, WrapLabel
+
 # Wheel step and the zoom range it is clamped to, as a scale factor where
 # 1.0 is one image pixel per screen pixel.
 ZOOM_STEP = 1.25
@@ -200,18 +202,16 @@ class ResultPanel(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
 
         self._view = ZoomableImageView(parent=self)
-        self._message = QLabel("Generate a mosaic to see it here.")
+        self._message = WrapLabel("Generate a mosaic to see it here.")
         self._message.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._message.setWordWrap(True)
         self._stack = QStackedWidget()
         self._stack.addWidget(self._message)
         self._stack.addWidget(self._view)
         layout.addWidget(self._stack, 1)
 
-        self.info_label = QLabel()
+        self.info_label = WrapLabel()
         self.info_label.setTextInteractionFlags(
             Qt.TextInteractionFlag.TextSelectableByMouse)
-        self.info_label.setWordWrap(True)
         self.info_label.setContentsMargins(8, 4, 8, 0)
         self.info_label.hide()
         layout.addWidget(self.info_label)
@@ -227,10 +227,11 @@ class ResultPanel(QWidget):
         self.actual_btn.clicked.connect(self._view.actual_size)
         buttons.addWidget(self.actual_btn)
 
-        hint = QLabel("Scroll to zoom, drag to pan")
+        hint = HintLabel("Scroll to zoom, drag to pan")
         hint.setEnabled(False)  # palette-aware secondary text
-        buttons.addWidget(hint)
-        buttons.addStretch()
+        hint.setAlignment(Qt.AlignmentFlag.AlignLeft
+                          | Qt.AlignmentFlag.AlignVCenter)
+        buttons.addWidget(hint, 1)
 
         self.folder_btn = QPushButton("Open Folder")
         self.folder_btn.clicked.connect(self.open_folder)

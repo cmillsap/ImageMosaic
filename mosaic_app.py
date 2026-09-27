@@ -8,7 +8,7 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                               QFileDialog, QSpinBox, QCheckBox, QProgressBar,
                               QMessageBox, QComboBox, QSplitter, QScrollArea,
                               QTabWidget, QStackedWidget, QSlider, QToolButton,
-                              QButtonGroup, QFrame)
+                              QButtonGroup, QFrame, QGridLayout, QSizePolicy)
 from PyQt6.QtCore import Qt, QThread, QStandardPaths, QSettings, QEvent, QSize
 from PyQt6.QtGui import QImage, QPixmap
 
@@ -17,6 +17,8 @@ from mosaic_worker import MosaicJob, MosaicWorker
 from result_viewer import GridPreview, ResultPanel
 from tile_database import find_tile_files
 from tile_preprocessor import PreprocessorConfig
+from ui_support import (HintLabel, WidestTextLabel, WrapLabel,
+                        initial_window_rect, refresh_scaled_fonts, scale_font)
 
 # (label, extension) for each output format offered in the UI.
 OUTPUT_FORMATS = [("PNG", ".png"), ("JPEG", ".jpg"), ("TIFF", ".tif")]
@@ -98,10 +100,7 @@ def _section(title: str):
 
     header = QHBoxLayout()
     label = QLabel(title.upper())
-    font = label.font()
-    font.setBold(True)
-    font.setPointSizeF(font.pointSizeF() * 0.85)
-    label.setFont(font)
+    scale_font(label, 0.85, bold=True)
     header.addWidget(label)
     header.addStretch()
     status = QLabel()
@@ -117,8 +116,8 @@ def _divider() -> QFrame:
     return line
 
 
-def _secondary(text: str = "") -> QLabel:
-    label = QLabel(text)
+def _secondary(text: str = "", wrap: bool = False) -> QLabel:
+    label = WrapLabel(text) if wrap else QLabel(text)
     label.setEnabled(False)  # palette-aware secondary text
     return label
 
@@ -150,6 +149,14 @@ class _VerticalScrollArea(QScrollArea):
                   + self.verticalScrollBar().sizeHint().width()
                   + 2 * self.frameWidth())
         return QSize(max(hint.width(), needed), hint.height())
+
+
+class _ProgressBar(QProgressBar):
+    """A progress bar about 30 characters wide in the current font."""
+
+    def sizeHint(self) -> QSize:
+        hint = super().sizeHint()
+        return QSize(self.fontMetrics().averageCharWidth() * 30, hint.height())
 
 
 class MosaicApp(QMainWindow):
@@ -186,7 +193,8 @@ class MosaicApp(QMainWindow):
 
     def init_ui(self):
         self.setWindowTitle("Image Mosaic Generator")
-        self.setGeometry(100, 100, 1200, 800)
+        self.setGeometry(initial_window_rect(
+            self.screen().availableGeometry(), QSize(1200, 800)))
         self.setAcceptDrops(True)
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -199,6 +207,7 @@ class MosaicApp(QMainWindow):
         self.setCentralWidget(splitter)
 
         self._build_status_bar()
+        refresh_scaled_fonts(self)
 
         # Every widget exists now, so it is safe to populate the readouts.
         self.update_derived_dimensions()
@@ -245,10 +254,10 @@ class MosaicApp(QMainWindow):
 
         details = QVBoxLayout()
         details.setSpacing(2)
-        self.guide_name_label = QLabel("No photo chosen")
-        self.guide_name_label.setWordWrap(True)
+        self.guide_name_label = WrapLabel("No photo chosen")
         details.addWidget(self.guide_name_label)
-        self.guide_size_label = _secondary("Or drop one on the preview")
+        self.guide_size_label = _secondary("Or drop one on the preview",
+                                           wrap=True)
         details.addWidget(self.guide_size_label)
         row.addLayout(details, 1)
         layout.addLayout(row)
@@ -288,9 +297,10 @@ class MosaicApp(QMainWindow):
         self.print_size_combo.currentIndexChanged.connect(self.on_print_size_chosen)
         row.addWidget(self.print_size_combo, 1)
 
-        self.orientation_btn = QPushButton("⇄")
+        # A tool button sizes itself to the glyph at any font size.
+        self.orientation_btn = QToolButton()
+        self.orientation_btn.setText("⇄")
         self.orientation_btn.setToolTip("Swap portrait and landscape")
-        self.orientation_btn.setFixedWidth(36)
         self.orientation_btn.clicked.connect(self.swap_orientation)
         row.addWidget(self.orientation_btn)
         layout.addLayout(row)
@@ -316,13 +326,12 @@ class MosaicApp(QMainWindow):
         custom.addStretch()
         layout.addWidget(self.custom_print_row)
 
-        self.output_dimensions_label = _secondary()
+        self.output_dimensions_label = _secondary(wrap=True)
         layout.addWidget(self.output_dimensions_label)
 
         # Warns when the photo's shape differs from the print's, since
         # GuideImage stretches it to fit rather than cropping.
-        self.stretch_label = QLabel()
-        self.stretch_label.setWordWrap(True)
+        self.stretch_label = WrapLabel()
         self.stretch_label.setStyleSheet(PROBLEM_STYLE)
         self.stretch_label.setVisible(False)
         layout.addWidget(self.stretch_label)
@@ -343,8 +352,12 @@ class MosaicApp(QMainWindow):
         self.tile_width_spinbox.valueChanged.connect(self.on_tile_width_edited)
         row.addWidget(self.tile_width_spinbox)
         row.addStretch()
+        layout.addLayout(row)
 
-        # Exclusive, checkable buttons: one per shape plus Custom.
+        # Exclusive, checkable buttons: one per shape plus Custom. On a
+        # row of their own, so large text doesn't widen the sidebar.
+        row = QHBoxLayout()
+        row.addWidget(QLabel("Shape"))
         self.tile_shape_group = QButtonGroup(self)
         self.tile_shape_buttons = []
         for i, (label, _, _) in enumerate(TILE_SHAPES + [("Custom", 0, 0)]):
@@ -354,6 +367,7 @@ class MosaicApp(QMainWindow):
             self.tile_shape_group.addButton(btn, i)
             self.tile_shape_buttons.append(btn)
             row.addWidget(btn)
+        row.addStretch()
         self.tile_shape_buttons[0].setChecked(True)
         self.tile_shape_group.idClicked.connect(self.on_tile_shape_chosen)
         layout.addLayout(row)
@@ -375,11 +389,10 @@ class MosaicApp(QMainWindow):
 
         # Aspect ratio readout - tiles are cropped to this ratio by the
         # preprocessor, so it is also the shape of every guide grid cell.
-        self.tile_aspect_label = _secondary()
+        self.tile_aspect_label = _secondary(wrap=True)
         layout.addWidget(self.tile_aspect_label)
 
-        self.grid_info_label = QLabel()
-        self.grid_info_label.setWordWrap(True)
+        self.grid_info_label = WrapLabel()
         layout.addWidget(self.grid_info_label)
         return box
 
@@ -408,14 +421,18 @@ class MosaicApp(QMainWindow):
 
         # Soft variety and colour tint. Unlike the hard limits under
         # Advanced, these trade colour accuracy for variety gradually.
+        # A grid lines the sliders up without fixing any label's width.
+        sliders = QGridLayout()
+        sliders.setColumnStretch(1, 1)
+        layout.addLayout(sliders)
         self.variety_slider, self.variety_value_label = self._add_slider(
-            layout, "Variety",
+            sliders, "Variety",
             "Favour images that have been used less.\n"
             "Each use makes an image slightly less likely to be picked again,\n"
             "so more of your library appears at some cost to colour accuracy.",
             suffix="")
         self.tint_slider, self.tint_value_label = self._add_slider(
-            layout, "Tint",
+            sliders, "Tint",
             "Shift each image's colours toward the part of the guide it covers.\n"
             "Makes loosely matched images read correctly, so Variety can be\n"
             "raised without the mosaic going muddy. 15-30% is usually subtle.",
@@ -480,24 +497,22 @@ class MosaicApp(QMainWindow):
         layout.addWidget(self.advanced_panel)
         return box
 
-    def _add_slider(self, layout, label, tooltip, suffix):
-        """A labelled 0-100 slider with its value shown alongside."""
-        row = QHBoxLayout()
+    def _add_slider(self, grid, label, tooltip, suffix):
+        """A labelled 0-100 slider, with its value alongside, as the next
+        row of grid."""
+        row = grid.rowCount()
         name = QLabel(label)
-        name.setFixedWidth(52)
         name.setToolTip(tooltip)
-        row.addWidget(name)
+        grid.addWidget(name, row, 0)
         slider = QSlider(Qt.Orientation.Horizontal)
         slider.setRange(0, 100)
         slider.setValue(0)
         slider.setToolTip(tooltip)
-        row.addWidget(slider, 1)
-        value = QLabel()
-        value.setFixedWidth(36)
+        grid.addWidget(slider, row, 1)
+        value = WidestTextLabel(f"100{suffix}")
         value.setAlignment(Qt.AlignmentFlag.AlignRight
                            | Qt.AlignmentFlag.AlignVCenter)
-        row.addWidget(value)
-        layout.addLayout(row)
+        grid.addWidget(value, row, 2)
 
         def show_value(v):
             value.setText(f"{v}{suffix}" if v else "off")
@@ -536,18 +551,14 @@ class MosaicApp(QMainWindow):
         self.generate_btn = QPushButton("Generate Mosaic")
         self.generate_btn.setEnabled(False)
         self.generate_btn.setDefault(True)
-        self.generate_btn.setStyleSheet("""
-            QPushButton {
-                padding: 10px;
-                font-size: 14px;
-                font-weight: bold;
-            }
-        """)
+        self.generate_btn.setStyleSheet("QPushButton { padding: 10px; }")
+        # Relative to the system font, so it stays the largest text.
+        scale_font(self.generate_btn, 1.2, bold=True)
         self.generate_btn.clicked.connect(self.generate_mosaic)
         layout.addWidget(self.generate_btn)
 
         # Says why Generate is disabled; empty when it isn't.
-        self.generate_hint_label = _secondary()
+        self.generate_hint_label = _secondary(wrap=True)
         self.generate_hint_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.generate_hint_label.setWordWrap(True)
         layout.addWidget(self.generate_hint_label)
@@ -562,7 +573,7 @@ class MosaicApp(QMainWindow):
         layout.setContentsMargins(0, 0, 0, 0)
 
         self.preview_stack = QStackedWidget()
-        self.preview_placeholder = QLabel(
+        self.preview_placeholder = WrapLabel(
             "Drop a photo here, or choose one on the left.\n\n"
             "Drop a folder to use it for the tile photos.")
         self.preview_placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -580,10 +591,14 @@ class MosaicApp(QMainWindow):
         controls.setContentsMargins(8, 4, 8, 4)
         self.show_grid_checkbox = QCheckBox("Show tile grid")
         self.show_grid_checkbox.setChecked(True)
+        # Never narrower than its text; the hint beside it wraps instead.
+        self.show_grid_checkbox.setSizePolicy(QSizePolicy.Policy.Minimum,
+                                              QSizePolicy.Policy.Fixed)
         self.show_grid_checkbox.toggled.connect(self.grid_preview.set_show_grid)
         controls.addWidget(self.show_grid_checkbox)
-        controls.addStretch()
-        controls.addWidget(_secondary("Scroll to zoom, drag to pan"))
+        hint = HintLabel("Scroll to zoom, drag to pan")
+        hint.setEnabled(False)  # palette-aware secondary text
+        controls.addWidget(hint, 1)
         fit_btn = QPushButton("Fit")
         fit_btn.clicked.connect(self.grid_preview.fit)
         controls.addWidget(fit_btn)
@@ -610,11 +625,10 @@ class MosaicApp(QMainWindow):
         self.progress_widget = QWidget()
         layout = QHBoxLayout(self.progress_widget)
         layout.setContentsMargins(0, 0, 0, 0)
-        self.progress_bar = QProgressBar()
+        self.progress_bar = _ProgressBar()
         self.progress_bar.setRange(0, 100)
         self.progress_bar.setValue(0)
         self.progress_bar.setTextVisible(True)
-        self.progress_bar.setFixedWidth(260)
         layout.addWidget(self.progress_bar)
         self.cancel_btn = QPushButton("Cancel")
         self.cancel_btn.clicked.connect(self.cancel_mosaic)
@@ -1218,6 +1232,11 @@ class MosaicApp(QMainWindow):
         if self.worker is not None:
             self.worker.deleteLater()
             self.worker = None
+
+    def changeEvent(self, event):
+        super().changeEvent(event)
+        if event.type() == QEvent.Type.FontChange:
+            refresh_scaled_fonts(self)
 
     def closeEvent(self, event):
         """Never leave a worker thread running after the window closes."""
