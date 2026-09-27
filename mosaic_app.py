@@ -17,8 +17,9 @@ from mosaic_worker import MosaicJob, MosaicWorker
 from result_viewer import GridPreview, ResultPanel
 from tile_database import find_tile_files
 from tile_preprocessor import PreprocessorConfig
-from ui_support import (HintLabel, WidestTextLabel, WrapLabel,
-                        initial_window_rect, refresh_scaled_fonts, scale_font)
+from ui_support import (HintLabel, StatusLabel, WidestTextLabel, WrapLabel,
+                        announce, initial_window_rect, make_secondary,
+                        refresh_scaled_fonts, scale_font)
 
 # (label, extension) for each output format offered in the UI.
 OUTPUT_FORMATS = [("PNG", ".png"), ("JPEG", ".jpg"), ("TIFF", ".tif")]
@@ -46,9 +47,6 @@ STRETCH_TOLERANCE = 0.03
 
 # Longest side of the photo kept for the on-screen preview.
 PREVIEW_MAX_DIM = 2048
-
-DONE_STYLE = "QLabel { color: #2e8b57; }"
-PROBLEM_STYLE = "QLabel { color: #e74c3c; }"
 
 
 def default_output_folder() -> str:
@@ -100,10 +98,11 @@ def _section(title: str):
 
     header = QHBoxLayout()
     label = QLabel(title.upper())
+    label.setAccessibleName(title)  # Not spelled out letter by letter.
     scale_font(label, 0.85, bold=True)
     header.addWidget(label)
     header.addStretch()
-    status = QLabel()
+    status = StatusLabel()
     header.addWidget(status)
     layout.addLayout(header)
     return box, layout, status
@@ -118,7 +117,17 @@ def _divider() -> QFrame:
 
 def _secondary(text: str = "", wrap: bool = False) -> QLabel:
     label = WrapLabel(text) if wrap else QLabel(text)
-    label.setEnabled(False)  # palette-aware secondary text
+    make_secondary(label)
+    return label
+
+
+def _label_for(widget: QWidget, text: str, name: str = None) -> QLabel:
+    """A visible label for widget, which screen readers also hear as its
+    name. name overrides that where the text alone is ambiguous, e.g.
+    "Print width" for a "Width" label that sits beside the print size."""
+    label = QLabel(text)
+    label.setBuddy(widget)
+    widget.setAccessibleName(name or text.replace("&", ""))
     return label
 
 
@@ -181,6 +190,8 @@ class MosaicApp(QMainWindow):
         # Set while a render is in flight; both are None when idle.
         self.worker = None
         self.worker_thread = None
+        # The last render stage read out to screen readers.
+        self._announced_stage = None
         # Set when the user picks "Custom" so typing a size that happens to
         # match a preset doesn't snap the fields shut mid-edit.
         self._custom_print_size = False
@@ -250,6 +261,7 @@ class MosaicApp(QMainWindow):
         self.guide_thumbnail.setFixedSize(72, 54)
         self.guide_thumbnail.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.guide_thumbnail.setFrameShape(QFrame.Shape.StyledPanel)
+        self.guide_thumbnail.setAccessibleName("Photo thumbnail")
         row.addWidget(self.guide_thumbnail)
 
         details = QVBoxLayout()
@@ -274,8 +286,10 @@ class MosaicApp(QMainWindow):
         self.folder_path_edit = QLineEdit()
         self.folder_path_edit.setPlaceholderText("No folder chosen")
         self.folder_path_edit.setReadOnly(True)
+        self.folder_path_edit.setAccessibleName("Tile photos folder")
         row.addWidget(self.folder_path_edit)
         browse_btn = QPushButton("Choose…")
+        browse_btn.setAccessibleName("Choose tile photos folder")
         browse_btn.clicked.connect(self.select_tile_folder)
         row.addWidget(browse_btn)
         layout.addLayout(row)
@@ -295,12 +309,14 @@ class MosaicApp(QMainWindow):
             self.print_size_combo.addItem(f"{short} × {long} in", (short, long))
         self.print_size_combo.addItem("Custom…", None)
         self.print_size_combo.currentIndexChanged.connect(self.on_print_size_chosen)
+        self.print_size_combo.setAccessibleName("Print size")
         row.addWidget(self.print_size_combo, 1)
 
         # A tool button sizes itself to the glyph at any font size.
         self.orientation_btn = QToolButton()
         self.orientation_btn.setText("⇄")
         self.orientation_btn.setToolTip("Swap portrait and landscape")
+        self.orientation_btn.setAccessibleName("Swap portrait and landscape")
         self.orientation_btn.clicked.connect(self.swap_orientation)
         row.addWidget(self.orientation_btn)
         layout.addLayout(row)
@@ -309,15 +325,16 @@ class MosaicApp(QMainWindow):
         self.custom_print_row = QWidget()
         custom = QHBoxLayout(self.custom_print_row)
         custom.setContentsMargins(0, 0, 0, 0)
-        custom.addWidget(QLabel("Width"))
         self.width_spinbox = QSpinBox()
+        custom.addWidget(_label_for(self.width_spinbox, "Width", "Print width"))
         self.width_spinbox.setRange(1, 100)
         self.width_spinbox.setSuffix(" in")
         self.width_spinbox.setValue(self.output_width_inches)
         self.width_spinbox.valueChanged.connect(self.on_print_dimension_edited)
         custom.addWidget(self.width_spinbox)
-        custom.addWidget(QLabel("Height"))
         self.height_spinbox = QSpinBox()
+        custom.addWidget(_label_for(self.height_spinbox, "Height",
+                                    "Print height"))
         self.height_spinbox.setRange(1, 100)
         self.height_spinbox.setSuffix(" in")
         self.height_spinbox.setValue(self.output_height_inches)
@@ -331,8 +348,7 @@ class MosaicApp(QMainWindow):
 
         # Warns when the photo's shape differs from the print's, since
         # GuideImage stretches it to fit rather than cropping.
-        self.stretch_label = WrapLabel()
-        self.stretch_label.setStyleSheet(PROBLEM_STYLE)
+        self.stretch_label = StatusLabel(wrap=True)
         self.stretch_label.setVisible(False)
         layout.addWidget(self.stretch_label)
 
@@ -343,9 +359,10 @@ class MosaicApp(QMainWindow):
         box, layout, _ = _section("Tiles")
 
         row = QHBoxLayout()
-        self.tile_size_label = QLabel("Size")
-        row.addWidget(self.tile_size_label)
         self.tile_width_spinbox = QSpinBox()
+        self.tile_size_label = _label_for(self.tile_width_spinbox, "Size",
+                                          "Tile size")
+        row.addWidget(self.tile_size_label)
         self.tile_width_spinbox.setRange(8, 2000)
         self.tile_width_spinbox.setSuffix(" px")
         self.tile_width_spinbox.setValue(self.tile_width)
@@ -363,6 +380,7 @@ class MosaicApp(QMainWindow):
         for i, (label, _, _) in enumerate(TILE_SHAPES + [("Custom", 0, 0)]):
             btn = QToolButton()
             btn.setText(label)
+            btn.setAccessibleName(f"{label} tile shape")
             btn.setCheckable(True)
             self.tile_shape_group.addButton(btn, i)
             self.tile_shape_buttons.append(btn)
@@ -376,8 +394,9 @@ class MosaicApp(QMainWindow):
         self.custom_tile_row = QWidget()
         custom = QHBoxLayout(self.custom_tile_row)
         custom.setContentsMargins(0, 0, 0, 0)
-        custom.addWidget(QLabel("Height"))
         self.tile_height_spinbox = QSpinBox()
+        custom.addWidget(_label_for(self.tile_height_spinbox, "Height",
+                                    "Tile height"))
         self.tile_height_spinbox.setRange(8, 2000)
         self.tile_height_spinbox.setSuffix(" px")
         self.tile_height_spinbox.setValue(self.tile_height)
@@ -392,13 +411,13 @@ class MosaicApp(QMainWindow):
         self.tile_aspect_label = _secondary(wrap=True)
         layout.addWidget(self.tile_aspect_label)
 
-        self.grid_info_label = WrapLabel()
+        self.grid_info_label = StatusLabel(wrap=True)
         layout.addWidget(self.grid_info_label)
         return box
 
     def _build_look_section(self) -> QWidget:
         box, layout, self.look_custom_label = _section("Look")
-        self.look_custom_label.setEnabled(False)
+        make_secondary(self.look_custom_label)
 
         presets = QHBoxLayout()
         presets.setSpacing(0)
@@ -455,9 +474,9 @@ class MosaicApp(QMainWindow):
         # Hard variety limits. Without these a plain nearest-neighbour match
         # reuses one photo across every flat area of the guide.
         row = QHBoxLayout()
-        row.addWidget(QLabel("Max uses per image"))
-        row.addStretch()
         self.max_reuse_spinbox = QSpinBox()
+        row.addWidget(_label_for(self.max_reuse_spinbox, "Max uses per image"))
+        row.addStretch()
         self.max_reuse_spinbox.setRange(0, 9999)
         self.max_reuse_spinbox.setValue(0)
         self.max_reuse_spinbox.setSpecialValueText("unlimited")
@@ -470,9 +489,10 @@ class MosaicApp(QMainWindow):
         advanced.addLayout(row)
 
         row = QHBoxLayout()
-        row.addWidget(QLabel("Min gap between repeats"))
-        row.addStretch()
         self.min_distance_spinbox = QSpinBox()
+        row.addWidget(_label_for(self.min_distance_spinbox,
+                                 "Min gap between repeats"))
+        row.addStretch()
         self.min_distance_spinbox.setRange(0, 50)
         self.min_distance_spinbox.setValue(0)
         self.min_distance_spinbox.setSpecialValueText("none")
@@ -501,10 +521,10 @@ class MosaicApp(QMainWindow):
         """A labelled 0-100 slider, with its value alongside, as the next
         row of grid."""
         row = grid.rowCount()
-        name = QLabel(label)
+        slider = QSlider(Qt.Orientation.Horizontal)
+        name = _label_for(slider, label)
         name.setToolTip(tooltip)
         grid.addWidget(name, row, 0)
-        slider = QSlider(Qt.Orientation.Horizontal)
         slider.setRange(0, 100)
         slider.setValue(0)
         slider.setToolTip(tooltip)
@@ -528,20 +548,22 @@ class MosaicApp(QMainWindow):
         layout.setSpacing(6)
 
         row = QHBoxLayout()
-        row.addWidget(QLabel("Save to"))
         self.output_folder_edit = QLineEdit(self.output_folder)
         self.output_folder_edit.setReadOnly(True)
+        row.addWidget(_label_for(self.output_folder_edit, "Save to",
+                                 "Save to folder"))
         row.addWidget(self.output_folder_edit, 1)
         output_browse_btn = QPushButton("Change…")
+        output_browse_btn.setAccessibleName("Change save folder")
         output_browse_btn.clicked.connect(self.select_output_folder)
         row.addWidget(output_browse_btn)
         layout.addLayout(row)
 
         row = QHBoxLayout()
-        row.addWidget(QLabel("As"))
+        self.output_format_combo = QComboBox()
+        row.addWidget(_label_for(self.output_format_combo, "As", "File format"))
         self.output_name_label = _secondary()
         row.addWidget(self.output_name_label, 1)
-        self.output_format_combo = QComboBox()
         for label, ext in OUTPUT_FORMATS:
             self.output_format_combo.addItem(label, ext)
         self.output_format_combo.currentIndexChanged.connect(self.update_output_name)
@@ -560,7 +582,6 @@ class MosaicApp(QMainWindow):
         # Says why Generate is disabled; empty when it isn't.
         self.generate_hint_label = _secondary(wrap=True)
         self.generate_hint_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.generate_hint_label.setWordWrap(True)
         layout.addWidget(self.generate_hint_label)
         return footer
 
@@ -577,9 +598,10 @@ class MosaicApp(QMainWindow):
             "Drop a photo here, or choose one on the left.\n\n"
             "Drop a folder to use it for the tile photos.")
         self.preview_placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.preview_placeholder.setEnabled(False)
+        make_secondary(self.preview_placeholder)
         self.preview_stack.addWidget(self.preview_placeholder)
         self.grid_preview = GridPreview()
+        self.grid_preview.setAccessibleName("Photo with tile grid")
         # Let drops fall through to the window, which knows what to do.
         self.grid_preview.setAcceptDrops(False)
         self.grid_preview.viewport().setAcceptDrops(False)
@@ -596,14 +618,13 @@ class MosaicApp(QMainWindow):
                                               QSizePolicy.Policy.Fixed)
         self.show_grid_checkbox.toggled.connect(self.grid_preview.set_show_grid)
         controls.addWidget(self.show_grid_checkbox)
-        hint = HintLabel("Scroll to zoom, drag to pan")
-        hint.setEnabled(False)  # palette-aware secondary text
-        controls.addWidget(hint, 1)
+        controls.addWidget(HintLabel("Scroll to zoom, drag to pan"), 1)
         fit_btn = QPushButton("Fit")
         fit_btn.clicked.connect(self.grid_preview.fit)
         controls.addWidget(fit_btn)
         actual_btn = QPushButton("100%")
         actual_btn.setToolTip("One print pixel per screen pixel")
+        actual_btn.setAccessibleName("Photo at actual size")
         actual_btn.clicked.connect(self.grid_preview.actual_size)
         controls.addWidget(actual_btn)
         self.preview_controls.setEnabled(False)  # nothing to show yet
@@ -629,6 +650,7 @@ class MosaicApp(QMainWindow):
         self.progress_bar.setRange(0, 100)
         self.progress_bar.setValue(0)
         self.progress_bar.setTextVisible(True)
+        self.progress_bar.setAccessibleName("Mosaic progress")
         layout.addWidget(self.progress_bar)
         self.cancel_btn = QPushButton("Cancel")
         self.cancel_btn.clicked.connect(self.cancel_mosaic)
@@ -667,8 +689,9 @@ class MosaicApp(QMainWindow):
         self.guide_name_label.setText(os.path.basename(file_path))
         self.guide_size_label.setText(f"{width} × {height} px")
         self.select_image_btn.setText("Change Photo…")
-        self.photo_status_label.setText("✓")
-        self.photo_status_label.setStyleSheet(DONE_STYLE)
+        self.photo_status_label.set_status(kind="done", spoken="Photo chosen")
+        announce(self, f"Photo chosen: {os.path.basename(file_path)}, "
+                       f"{width} by {height} pixels")
 
         self.grid_preview.set_photo(pixmap)
         self.preview_stack.setCurrentWidget(self.grid_preview)
@@ -701,25 +724,27 @@ class MosaicApp(QMainWindow):
         Only lists file names, so it stays quick even for a large library;
         nothing is decoded until Generate.
         """
+        status = self.tiles_status_label
         if not self.tile_folder_path:
             self.tile_count = None
-            self.tiles_status_label.setText("")
+            status.set_status()
         else:
             try:
                 self.tile_count = len(find_tile_files(
                     self.tile_folder_path, recursive=self.scan_subdirectories))
             except (OSError, ValueError):
                 self.tile_count = None
-                self.tiles_status_label.setText("Folder not found")
-                self.tiles_status_label.setStyleSheet(PROBLEM_STYLE)
+                status.set_status("Folder not found", "problem",
+                                  spoken="Tile folder not found")
             else:
                 if self.tile_count:
-                    self.tiles_status_label.setText(
-                        f"✓ {self.tile_count:,} found")
-                    self.tiles_status_label.setStyleSheet(DONE_STYLE)
+                    status.set_status(
+                        f"{self.tile_count:,} found", "done",
+                        spoken=f"{self.tile_count:,} tile photos found")
                 else:
-                    self.tiles_status_label.setText("No images found")
-                    self.tiles_status_label.setStyleSheet(PROBLEM_STYLE)
+                    status.set_status("No images found", "problem",
+                                      spoken="No images in the tile folder")
+            announce(self, status.accessibleName())
         self.check_ready_to_generate()
 
     def dragEnterEvent(self, event):
@@ -847,6 +872,8 @@ class MosaicApp(QMainWindow):
             self.tile_shape_buttons[-1].setChecked(True)
         self.custom_tile_row.setVisible(custom)
         self.tile_size_label.setText("Width" if custom else "Size")
+        self.tile_width_spinbox.setAccessibleName(
+            "Tile width" if custom else "Tile size")
 
     # ------------------------------------------------------------------
     # Look
@@ -926,33 +953,39 @@ class MosaicApp(QMainWindow):
         cols, rows = self.grid_cols, self.grid_rows
         self.grid_preview.set_grid(cols, rows, self.tile_width, self.tile_height)
         if cols == 0 or rows == 0:
-            self.grid_info_label.setText(
-                "⚠ Tile is larger than the print - no tiles fit."
-            )
-            self.grid_info_label.setStyleSheet(PROBLEM_STYLE)
+            text = "Tile is larger than the print - no tiles fit."
+            if self.grid_info_label.kind != "problem":
+                announce(self, f"Warning: {text}")
+            self.grid_info_label.set_status(text, "problem")
         else:
             rem_x, rem_y = self.remainder_px
             text = f"{cols} × {rows} grid = {self.total_tiles:,} tiles"
             if rem_x or rem_y:
                 text += f"\n{rem_x} × {rem_y} px unused at edges"
-            self.grid_info_label.setText(text)
-            self.grid_info_label.setStyleSheet("")
+            self.grid_info_label.set_status(text)
         self.check_ready_to_generate()
 
     def update_stretch_warning(self):
         """Say how far the photo will be stretched to fill the grid."""
         stretch = self.photo_stretch
         if stretch is None or abs(stretch - 1) < STRETCH_TOLERANCE:
+            self.stretch_label.set_status()
             self.stretch_label.setVisible(False)
             return
         if stretch > 1:
             text = f"wider by {stretch - 1:.0%}"
         else:
             text = f"taller by {1 / stretch - 1:.0%}"
-        self.stretch_label.setText(
-            f"⚠ The photo will be stretched {text} to fill this print. "
-            f"Try ⇄ or a size closer to its shape.")
+        was = self.stretch_label.accessibleName()
+        self.stretch_label.set_status(
+            f"The photo will be stretched {text} to fill this print. "
+            f"Try ⇄ or a size closer to its shape.", "problem",
+            spoken=f"Warning: the photo will be stretched {text} to fill "
+                   f"this print. Try swapping orientation or a size closer "
+                   f"to its shape.")
         self.stretch_label.setVisible(True)
+        if self.stretch_label.accessibleName() != was:
+            announce(self, self.stretch_label.accessibleName())
 
     @property
     def photo_stretch(self):
@@ -1178,6 +1211,8 @@ class MosaicApp(QMainWindow):
         self.worker.cancelled.connect(self.on_render_cancelled)
 
         self.show_progress()
+        self._announced_stage = None
+        announce(self, "Generating mosaic")
         self.worker_thread.start()
 
     def cancel_mosaic(self):
@@ -1189,6 +1224,10 @@ class MosaicApp(QMainWindow):
 
     def on_stage_progress(self, stage: str, completed: int, total: int):
         """Show which stage is running and how far through it is."""
+        # Each stage is announced once; its running count only on screen.
+        if stage != self._announced_stage:
+            self._announced_stage = stage
+            announce(self, stage)
         if total > 1:
             self.set_progress_status(f"{stage}  ({completed:,} of {total:,})")
         else:
@@ -1205,6 +1244,8 @@ class MosaicApp(QMainWindow):
         )
         self.progress_status_label.setText(
             f"Saved {os.path.basename(output_path)}")
+        announce(self, f"Mosaic saved as {os.path.basename(output_path)}",
+                 important=True)
 
     def show_result(self, output_path: str, summary: str):
         """Show the finished mosaic in the canvas's Mosaic tab."""
@@ -1221,6 +1262,7 @@ class MosaicApp(QMainWindow):
         self._teardown_worker()
         self.hide_progress()
         self.set_progress_status("Cancelled")
+        announce(self, "Mosaic cancelled")
 
     def _teardown_worker(self):
         """Stop the thread and drop both objects."""

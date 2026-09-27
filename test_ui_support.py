@@ -9,17 +9,34 @@ import pytest
 # Qt needs an offscreen platform plugin under CI / headless runs.
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+import sys
+
 from PyQt6.QtCore import QRect, QSize
+from PyQt6.QtGui import QColor, QPalette
 from PyQt6.QtWidgets import QApplication, QLabel, QVBoxLayout, QWidget
 
-from ui_support import (HintLabel, WidestTextLabel, WrapLabel,
-                        initial_window_rect, refresh_scaled_fonts, scale_font)
+import ui_support
+from ui_support import (HintLabel, StatusLabel, WidestTextLabel, WrapLabel,
+                        announce, contrast_ratio, initial_window_rect,
+                        make_secondary, readable_color, refresh_scaled_fonts,
+                        scale_font, secondary_text_color, set_announcer)
 
 
 @pytest.fixture(scope="session")
 def qapp():
     app = QApplication.instance() or QApplication([])
     yield app
+
+
+def themed_palette(text, background):
+    palette = QPalette()
+    palette.setColor(QPalette.ColorRole.WindowText, QColor(text))
+    palette.setColor(QPalette.ColorRole.Window, QColor(background))
+    return palette
+
+
+LIGHT = ("#1a1a1a", "#f3f3f3")
+DARK = ("#ffffff", "#202020")
 
 
 def set_point_size(widget, size):
@@ -149,3 +166,166 @@ class TestHintLabel:
     def test_text_is_always_available_as_a_tooltip(self, qapp):
         hint = HintLabel("Scroll to zoom, drag to pan")
         assert hint.toolTip() == hint.text()
+
+
+# ============================================================================
+# Contrast
+# ============================================================================
+
+class TestContrast:
+
+    def test_known_ratios(self):
+        assert contrast_ratio(QColor("black"), QColor("white")) == \
+            pytest.approx(21)
+        assert contrast_ratio(QColor("#777"), QColor("#777")) == \
+            pytest.approx(1)
+
+    def test_is_symmetric(self):
+        a, b = QColor("#2e8b57"), QColor("#f3f3f3")
+        assert contrast_ratio(a, b) == pytest.approx(contrast_ratio(b, a))
+
+    @pytest.mark.parametrize("color", ["#2e8b57", "#e74c3c", "#999999"])
+    @pytest.mark.parametrize("background", ["#ffffff", "#f3f3f3", "#202020"])
+    def test_readable_color_meets_the_floor(self, color, background):
+        fixed = readable_color(QColor(color), QColor(background))
+        assert contrast_ratio(fixed, QColor(background)) >= 4.5
+
+    def test_readable_color_leaves_good_colours_alone(self):
+        assert readable_color(QColor("black"), QColor("white")) == \
+            QColor("black")
+
+    @pytest.mark.parametrize("scheme", [LIGHT, DARK])
+    def test_secondary_text_is_quieter_but_readable(self, scheme):
+        palette = themed_palette(*scheme)
+        color = secondary_text_color(palette)
+        background = QColor(scheme[1])
+        assert contrast_ratio(color, background) >= 4.5
+        assert contrast_ratio(color, background) < \
+            contrast_ratio(QColor(scheme[0]), background)
+
+
+# ============================================================================
+# Secondary text
+# ============================================================================
+
+class TestSecondaryText:
+
+    def text_color(self, label):
+        return label.palette().color(QPalette.ColorGroup.Active,
+                                     QPalette.ColorRole.WindowText)
+
+    def test_stays_enabled(self, qapp):
+        label = QLabel("Hint")
+        make_secondary(label)
+        assert label.isEnabled()
+
+    def test_follows_a_theme_change(self, qapp):
+        parent = QWidget()
+        parent.setPalette(themed_palette(*LIGHT))
+        label = QLabel("Hint", parent)
+        make_secondary(label)
+        light = self.text_color(label)
+
+        parent.setPalette(themed_palette(*DARK))
+        dark = self.text_color(label)
+        assert dark != light
+        assert contrast_ratio(dark, QColor(DARK[1])) >= 4.5
+
+    def test_follows_a_new_parent(self, qapp):
+        label = QLabel("Hint")
+        make_secondary(label)
+        parent = QWidget()
+        parent.setPalette(themed_palette(*DARK))
+        label.setParent(parent)
+        assert contrast_ratio(self.text_color(label), QColor(DARK[1])) >= 4.5
+
+    def test_high_contrast_uses_plain_text(self, qapp, monkeypatch):
+        monkeypatch.setattr(ui_support, "high_contrast", lambda: True)
+        parent = QWidget()
+        parent.setPalette(themed_palette(*LIGHT))
+        label = QLabel("Hint", parent)
+        make_secondary(label)
+        assert self.text_color(label) == QColor(LIGHT[0])
+
+    def test_hints_are_secondary(self, qapp):
+        assert HintLabel("Scroll").property("tone") == "secondary"
+
+
+# ============================================================================
+# Status labels
+# ============================================================================
+
+class TestStatusLabel:
+
+    def test_problem_has_a_symbol_and_a_spoken_word(self, qapp):
+        label = StatusLabel()
+        label.set_status("Folder not found", "problem")
+        assert label.text() == "⚠ Folder not found"
+        assert label.accessibleName() == "Warning: Folder not found"
+
+    def test_done_has_a_tick(self, qapp):
+        label = StatusLabel()
+        label.set_status("3 found", "done")
+        assert label.text() == "✓ 3 found"
+        assert label.accessibleName() == "Done: 3 found"
+
+    def test_spoken_text_can_be_given(self, qapp):
+        label = StatusLabel()
+        label.set_status(kind="done", spoken="Photo chosen")
+        assert label.text() == "✓"
+        assert label.accessibleName() == "Photo chosen"
+
+    def test_plain_status_has_no_symbol(self, qapp):
+        label = StatusLabel()
+        label.set_status("60 × 90 grid")
+        assert label.text() == "60 × 90 grid"
+        assert label.kind is None
+
+    def test_clearing(self, qapp):
+        label = StatusLabel()
+        label.set_status("Folder not found", "problem")
+        label.set_status()
+        assert label.text() == "" and label.accessibleName() == ""
+
+    def test_wraps_only_when_asked(self, qapp):
+        assert not StatusLabel().wordWrap()
+        assert StatusLabel(wrap=True).wordWrap()
+
+
+# ============================================================================
+# Announcements
+# ============================================================================
+
+class TestAnnounce:
+
+    @pytest.fixture
+    def heard(self):
+        heard = []
+        previous = set_announcer(lambda w, text, important:
+                                 heard.append((text, important)))
+        yield heard
+        set_announcer(previous)
+
+    def test_routes_to_the_announcer(self, qapp, heard):
+        announce(QWidget(), "Mosaic saved", important=True)
+        assert heard == [("Mosaic saved", True)]
+
+    def test_empty_text_is_not_announced(self, qapp, heard):
+        announce(QWidget(), "")
+        assert heard == []
+
+    def test_set_announcer_returns_the_previous_one(self, qapp):
+        first = lambda *a: None
+        previous = set_announcer(first)
+        try:
+            assert set_announcer(previous) is first
+        finally:
+            set_announcer(previous)
+
+    def test_platform_announcer_never_raises(self, qapp):
+        # Offscreen there is no native window; it must simply do nothing.
+        announce(QWidget(), "Mosaic saved")
+
+    @pytest.mark.skipif(sys.platform != "win32", reason="Windows UI Automation")
+    def test_uia_notify_tolerates_a_bad_window(self, qapp):
+        ui_support._uia_notify(0, "Mosaic saved", False)

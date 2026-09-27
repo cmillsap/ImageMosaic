@@ -11,13 +11,17 @@ from PIL import Image
 # Qt needs an offscreen platform plugin under CI / headless runs.
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PyQt6.QtCore import QThread, QStandardPaths, QSettings
-from PyQt6.QtWidgets import (QAbstractButton, QApplication, QFileDialog,
-                             QLabel, QMessageBox, QScrollArea)
+from PyQt6.QtCore import QThread, QStandardPaths, QSettings, Qt
+from PyQt6.QtGui import QPalette
+from PyQt6.QtWidgets import (QAbstractButton, QAbstractSpinBox, QApplication,
+                             QComboBox, QFileDialog, QGraphicsView, QLabel,
+                             QLineEdit, QMessageBox, QProgressBar, QScrollArea,
+                             QSlider, QTabBar)
 
 from mosaic_app import LOOK_PRESETS, PRINT_SIZES, MosaicApp
+import ui_support
 from result_viewer import ResultPanel
-from ui_support import HintLabel
+from ui_support import HintLabel, contrast_ratio
 from tile_preprocessor import PreprocessorConfig
 
 
@@ -309,6 +313,163 @@ class TestLargeText:
                       if label.text() == "PHOTO")
         assert header.font().pointSizeF() == pytest.approx(point_size * 0.85)
         assert header.font().bold()
+
+
+# ============================================================================
+# Screen readers: every control named, every change heard
+# ============================================================================
+
+@pytest.fixture
+def announcements():
+    """What the window has asked screen readers to say, as (text, important)."""
+    heard = []
+    previous = ui_support.set_announcer(
+        lambda widget, text, important: heard.append((text, important)))
+    yield heard
+    ui_support.set_announcer(previous)
+
+
+def inputs(window):
+    """Every control a screen reader user can land on and operate."""
+    found = []
+    for widget in window.findChildren((QAbstractSpinBox, QSlider, QComboBox,
+                                       QLineEdit, QGraphicsView, QProgressBar,
+                                       QAbstractButton)):
+        if isinstance(widget.parentWidget(), (QAbstractSpinBox, QComboBox)):
+            continue  # The editor inside a spin box, named by its owner.
+        if isinstance(widget, QAbstractButton) and any(
+                c.isalpha() for c in widget.text()):
+            continue  # A button's own words name it.
+        if isinstance(widget.parentWidget(), QTabBar):
+            continue  # The tab bar's own scroll arrows.
+        found.append(widget)
+    return found
+
+
+class TestScreenReaders:
+
+    def test_every_input_has_a_name(self, window):
+        unnamed = [type(w).__name__ for w in inputs(window)
+                   if not w.accessibleName()]
+        assert unnamed == []
+
+    def test_names_tell_similar_inputs_apart(self, window):
+        names = [w.accessibleName() for w in inputs(window)]
+        assert len(names) == len(set(names))
+        assert window.width_spinbox.accessibleName() == "Print width"
+        assert window.tile_height_spinbox.accessibleName() == "Tile height"
+
+    def test_symbol_buttons_are_named_in_words(self, window):
+        assert window.orientation_btn.accessibleName() == \
+            "Swap portrait and landscape"
+        assert window.tile_shape_buttons[1].accessibleName() == "4:3 tile shape"
+
+    def test_visible_labels_are_tied_to_their_inputs(self, window):
+        buddies = {label.text(): label.buddy()
+                   for label in window.findChildren(QLabel) if label.buddy()}
+        assert buddies["Max uses per image"] is window.max_reuse_spinbox
+        assert buddies["Variety"] is window.variety_slider
+        assert buddies["As"] is window.output_format_combo
+
+    def test_tile_size_name_follows_custom_shape(self, window):
+        assert window.tile_width_spinbox.accessibleName() == "Tile size"
+        window.tile_shape_buttons[-1].click()
+        assert window.tile_width_spinbox.accessibleName() == "Tile width"
+
+    def test_section_headings_are_read_as_words(self, window):
+        header = next(label for label in window.findChildren(QLabel)
+                      if label.text() == "TILE PHOTOS")
+        assert header.accessibleName() == "Tile photos"
+
+    def test_no_label_is_disabled_just_to_look_grey(self, window):
+        # A disabled label is announced as unavailable.
+        disabled = [label.text() for label in window.findChildren(QLabel)
+                    if label.testAttribute(Qt.WidgetAttribute.WA_ForceDisabled)]
+        assert disabled == []
+
+    def test_secondary_text_is_quieter_but_readable(self, window):
+        background = window.palette().color(QPalette.ColorRole.Window)
+        body = window.palette().color(QPalette.ColorRole.WindowText)
+        # Labels inside a disabled container rightly take disabled colours.
+        secondary = [label for label in window.findChildren(QLabel)
+                     if label.property("tone") == "secondary"
+                     and label.isEnabled()]
+        assert window.generate_hint_label in secondary
+        for label in secondary:
+            color = label.palette().color(QPalette.ColorRole.WindowText)
+            assert color != body
+            assert contrast_ratio(color, background) >= 4.5
+
+    def test_photo_tick_is_heard_as_words(self, window, tmp_path):
+        path = tmp_path / "sunset.jpg"
+        Image.new('RGB', (400, 300)).save(path)
+        window.set_guide_image(str(path))
+        assert window.photo_status_label.text() == "✓"
+        assert window.photo_status_label.accessibleName() == "Photo chosen"
+
+
+class TestAnnouncements:
+
+    def test_choosing_a_photo(self, window, tmp_path, announcements):
+        path = tmp_path / "sunset.jpg"
+        Image.new('RGB', (400, 300)).save(path)
+        window.set_guide_image(str(path))
+        assert ("Photo chosen: sunset.jpg, 400 by 300 pixels",
+                False) in announcements
+
+    def test_tile_count(self, window, tmp_path, announcements):
+        for name in ("a.jpg", "b.png"):
+            (tmp_path / name).touch()
+        window.set_tile_folder(str(tmp_path))
+        assert ("2 tile photos found", False) in announcements
+
+    def test_missing_tile_folder(self, window, tmp_path, announcements):
+        window.set_tile_folder(str(tmp_path / "gone"))
+        assert ("Tile folder not found", False) in announcements
+
+    def test_stretch_warning_is_heard_once(self, window, tmp_path,
+                                           announcements):
+        path = tmp_path / "wide.png"
+        Image.new('RGB', (300, 200)).save(path)
+        window.set_guide_image(str(path))
+        warnings = [t for t, _ in announcements if "stretched" in t]
+        assert len(warnings) == 1
+        assert warnings[0].startswith("Warning: ")
+
+        # Unrelated edits that leave the warning unchanged stay quiet.
+        window.max_reuse_spinbox.setValue(3)
+        window.update_derived_dimensions()
+        assert len([t for t, _ in announcements if "stretched" in t]) == 1
+
+    def test_no_fit_warning_is_heard_once(self, window, announcements):
+        configure(window, 1, 1, 500, 500)
+        configure(window, 1, 1, 600, 600)
+        warnings = [t for t, _ in announcements if "no tiles fit" in t]
+        assert warnings == ["Warning: Tile is larger than the print - "
+                            "no tiles fit."]
+
+    def test_nothing_is_said_on_startup(self, qapp, settings, announcements):
+        window = MosaicApp(settings)
+        window.close()
+        assert announcements == []
+
+    def test_render_stages_and_result(self, window, monkeypatch, qapp,
+                                      tmp_path, announcements):
+        lifecycle = TestWorkerLifecycle()
+        output = lifecycle._start(window, monkeypatch, str(tmp_path))
+        lifecycle._drain(window, qapp)
+
+        texts = [t for t, _ in announcements]
+        assert texts[0] == "Generating mosaic"
+        # Each stage once, however many progress updates it sends.
+        stages = texts[1:-1]
+        assert len(stages) == len(set(stages)) > 0
+        assert announcements[-1] == (
+            f"Mosaic saved as {os.path.basename(output)}", True)
+
+    def test_cancel(self, window, announcements):
+        window.on_render_cancelled()
+        assert announcements == [("Mosaic cancelled", False)]
 
 
 # ============================================================================

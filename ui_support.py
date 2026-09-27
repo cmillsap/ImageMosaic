@@ -2,15 +2,220 @@
 UI Support Module
 
 Accessibility helpers shared by the main window and the canvas views: text
-that keeps its proportions when the system font grows, and window sizing
-that respects the screen it opens on.
+that keeps its proportions when the system font grows, window sizing that
+respects the screen it opens on, text colours that stay readable, and
+announcements for screen readers.
 """
 
-from PyQt6.QtCore import QRect, QSize, Qt
+import ctypes
+import sys
+
+from PyQt6.QtCore import QEvent, QObject, QRect, QSize, Qt
+from PyQt6.QtGui import QColor, QGuiApplication, QPalette
 from PyQt6.QtWidgets import QApplication, QLabel, QWidget
 
 # Largest share of the screen's free area the window opens at.
 MAX_SCREEN_SHARE = 0.9
+
+# WCAG AA contrast for normal-size text.
+MIN_CONTRAST = 4.5
+
+# How far secondary text is faded toward the background before the
+# contrast floor is applied.
+SECONDARY_FADE = 0.35
+
+
+# ============================================================================
+# Colour and contrast
+# ============================================================================
+
+def relative_luminance(color: QColor) -> float:
+    """WCAG relative luminance, 0 for black to 1 for white."""
+    def linear(channel):
+        c = channel / 255
+        return c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4
+    return (0.2126 * linear(color.red()) + 0.7152 * linear(color.green())
+            + 0.0722 * linear(color.blue()))
+
+
+def contrast_ratio(a: QColor, b: QColor) -> float:
+    """WCAG contrast ratio between two colours, from 1 to 21."""
+    darker, lighter = sorted((relative_luminance(a), relative_luminance(b)))
+    return (lighter + 0.05) / (darker + 0.05)
+
+
+def mix(a: QColor, b: QColor, amount: float) -> QColor:
+    """a moved amount (0-1) of the way toward b."""
+    return QColor(round(a.red() + (b.red() - a.red()) * amount),
+                  round(a.green() + (b.green() - a.green()) * amount),
+                  round(a.blue() + (b.blue() - a.blue()) * amount))
+
+
+def readable_color(color: QColor, background: QColor,
+                   minimum: float = MIN_CONTRAST) -> QColor:
+    """color, darkened or lightened just enough to read on background.
+
+    Keeps the hue where it can, so a brand green stays green, but never
+    returns text that fails the contrast floor.
+    """
+    target = QColor("black") if relative_luminance(background) > 0.18 \
+        else QColor("white")
+    for step in range(21):
+        candidate = mix(color, target, step / 20)
+        if contrast_ratio(candidate, background) >= minimum:
+            return candidate
+    return target
+
+
+def high_contrast() -> bool:
+    """True when the user has asked the system for high contrast.
+
+    The system theme then chooses every colour, and ours stay out of it.
+    """
+    hints = QGuiApplication.styleHints().accessibility()
+    return hints.contrastPreference() == Qt.ContrastPreference.HighContrast
+
+
+def secondary_text_color(palette: QPalette) -> QColor:
+    """Quieter than body text, but still comfortably readable."""
+    text = palette.color(QPalette.ColorRole.WindowText)
+    background = palette.color(QPalette.ColorRole.Window)
+    return readable_color(mix(text, background, SECONDARY_FADE), background)
+
+
+class _ToneKeeper(QObject):
+    """Re-colours toned labels whenever their palette could have changed:
+    a theme switch, high contrast turned on, or a move to a new parent."""
+
+    def eventFilter(self, obj, event):
+        if event.type() in (QEvent.Type.PaletteChange,
+                            QEvent.Type.ParentChange):
+            _apply_tone(obj)
+        return False
+
+
+_tone_keeper = None
+
+
+def make_secondary(label: QLabel) -> None:
+    """Show label as secondary text: hints, readouts and placeholders.
+
+    Greying text by disabling the label would also tell screen readers
+    it is unavailable, so the colour is set directly instead.
+    """
+    global _tone_keeper
+    if _tone_keeper is None:
+        _tone_keeper = _ToneKeeper()
+    label.setProperty("tone", "secondary")
+    label.installEventFilter(_tone_keeper)
+    _apply_tone(label)
+
+
+def _apply_tone(label: QLabel) -> None:
+    if label.property("toning"):
+        return  # Our own setPalette below echoes back as a PaletteChange.
+    parent = label.parentWidget()
+    base = parent.palette() if parent else QApplication.palette()
+    if high_contrast():
+        color = base.color(QPalette.ColorRole.WindowText)
+    else:
+        color = secondary_text_color(base)
+    palette = QPalette(label.palette())
+    for group in (QPalette.ColorGroup.Active, QPalette.ColorGroup.Inactive):
+        palette.setColor(group, QPalette.ColorRole.WindowText, color)
+    label.setProperty("toning", True)
+    label.setPalette(palette)
+    label.setProperty("toning", False)
+
+
+# ============================================================================
+# Screen reader announcements
+# ============================================================================
+
+# Windows UI Automation constants for UiaRaiseNotificationEvent.
+_NOTIFICATION_KIND_OTHER = 4
+_PROCESSING_IMPORTANT_MOST_RECENT = 1
+_PROCESSING_MOST_RECENT = 3
+
+# Replaces the platform announcer, e.g. to record announcements in tests.
+_announcer = None
+
+
+def set_announcer(announcer):
+    """Route announce() through announcer(widget, text, important) instead
+    of the platform. None restores the platform. Returns the previous one."""
+    global _announcer
+    previous, _announcer = _announcer, announcer
+    return previous
+
+
+def announce(widget: QWidget, text: str, important: bool = False) -> None:
+    """Have a screen reader speak text without moving the keyboard focus.
+
+    For changes the user didn't cause directly, or can't see from where
+    they are: a count arriving, a warning appearing, a render finishing.
+    important=True lets it interrupt; otherwise it waits its turn and a
+    newer message replaces an unspoken older one.
+    """
+    if not text:
+        return
+    if _announcer is not None:
+        _announcer(widget, text, important)
+    else:
+        _platform_announce(widget, text, important)
+
+
+def _platform_announce(widget: QWidget, text: str, important: bool) -> None:
+    # PyQt6 doesn't expose Qt's own QAccessibleAnnouncementEvent, so on
+    # Windows the notification goes straight to UI Automation, raised on
+    # the window. Elsewhere there is no equivalent yet, and the text
+    # stays visible on screen for anyone who reads it there.
+    if sys.platform != "win32" or QGuiApplication.platformName() != "windows":
+        return
+    try:
+        _uia_notify(int(widget.window().winId()), text, important)
+    except (OSError, AttributeError, ValueError):
+        pass  # An announcement is never worth crashing the UI over.
+
+
+def _uia_notify(hwnd: int, text: str, important: bool) -> None:
+    uia = ctypes.windll.uiautomationcore
+    if not uia.UiaClientsAreListening():
+        return  # No screen reader running.
+
+    provider = ctypes.c_void_p()
+    uia.UiaHostProviderFromHwnd.argtypes = [ctypes.c_void_p,
+                                            ctypes.POINTER(ctypes.c_void_p)]
+    if uia.UiaHostProviderFromHwnd(hwnd, ctypes.byref(provider)) or not provider:
+        return
+
+    oleaut = ctypes.windll.oleaut32
+    oleaut.SysAllocString.restype = ctypes.c_void_p
+    oleaut.SysAllocString.argtypes = [ctypes.c_wchar_p]
+    oleaut.SysFreeString.argtypes = [ctypes.c_void_p]
+    display = oleaut.SysAllocString(text)
+    activity = oleaut.SysAllocString("ImageMosaic.Status")
+    try:
+        uia.UiaRaiseNotificationEvent.argtypes = [
+            ctypes.c_void_p, ctypes.c_int, ctypes.c_int,
+            ctypes.c_void_p, ctypes.c_void_p]
+        uia.UiaRaiseNotificationEvent(
+            provider, _NOTIFICATION_KIND_OTHER,
+            _PROCESSING_IMPORTANT_MOST_RECENT if important
+            else _PROCESSING_MOST_RECENT,
+            display, activity)
+    finally:
+        oleaut.SysFreeString(display)
+        oleaut.SysFreeString(activity)
+        # IUnknown::Release, the third entry in the provider's vtable.
+        vtable = ctypes.cast(provider, ctypes.POINTER(
+            ctypes.POINTER(ctypes.c_void_p))).contents
+        ctypes.WINFUNCTYPE(ctypes.c_ulong, ctypes.c_void_p)(vtable[2])(provider)
+
+
+# ============================================================================
+# Sizing that follows the system font
+# ============================================================================
 
 
 def scale_font(widget: QWidget, factor: float, bold: bool = False) -> None:
@@ -85,6 +290,8 @@ class WrapLabel(QLabel):
         self._reserve_height()
 
     def _reserve_height(self) -> None:
+        if not self.wordWrap():
+            return
         height = self.heightForWidth(self.width()) if self.text() else 0
         if height != self.minimumHeight():
             self.setMinimumHeight(max(0, height))
@@ -103,6 +310,7 @@ class HintLabel(QLabel):
         self.setToolTip(text)
         self.setAlignment(Qt.AlignmentFlag.AlignRight
                           | Qt.AlignmentFlag.AlignVCenter)
+        make_secondary(self)
 
     def minimumSizeHint(self) -> QSize:
         return QSize(0, super().minimumSizeHint().height())
@@ -113,6 +321,40 @@ class HintLabel(QLabel):
     def paintEvent(self, event):
         if self.fits():
             super().paintEvent(event)
+
+
+class StatusLabel(WrapLabel):
+    """A short status that reads the same to everyone.
+
+    A done or problem status is marked with a symbol as well as colour,
+    and screen readers hear a word in place of the symbol: "Warning: Tile
+    is larger than the print" rather than "warning sign Tile is...".
+    """
+
+    SYMBOLS = {"done": "✓", "problem": "⚠"}
+    SPOKEN = {"done": "Done", "problem": "Warning"}
+    STYLES = {"done": "QLabel { color: #2e8b57; }",
+              "problem": "QLabel { color: #e74c3c; }"}
+
+    def __init__(self, wrap: bool = False, parent=None):
+        super().__init__(parent=parent)
+        self.setWordWrap(wrap)
+        self.kind = None
+
+    def set_status(self, text: str = "", kind: str = None,
+                   spoken: str = None) -> None:
+        """Show text as kind: None for plain, "done" or "problem".
+
+        spoken replaces what screen readers hear, for a status whose text
+        alone would be unclear, such as a bare tick.
+        """
+        self.kind = kind
+        symbol = self.SYMBOLS.get(kind, "")
+        self.setText(" ".join(part for part in (symbol, text) if part))
+        if spoken is None:
+            spoken = f"{self.SPOKEN[kind]}: {text}" if kind and text else text
+        self.setAccessibleName(spoken)
+        self.setStyleSheet(self.STYLES.get(kind, ""))
 
 
 def initial_window_rect(available: QRect, preferred: QSize) -> QRect:

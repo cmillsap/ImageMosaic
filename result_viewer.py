@@ -20,7 +20,7 @@ from PyQt6.QtWidgets import (QGraphicsPixmapItem, QGraphicsScene,
                              QGraphicsView, QHBoxLayout, QLabel, QPushButton,
                              QStackedWidget, QVBoxLayout, QWidget)
 
-from ui_support import HintLabel, WrapLabel
+from ui_support import HintLabel, WrapLabel, make_secondary
 
 # Wheel step and the zoom range it is clamped to, as a scale factor where
 # 1.0 is one image pixel per screen pixel.
@@ -202,7 +202,9 @@ class ResultPanel(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
 
         self._view = ZoomableImageView(parent=self)
+        self._view.setAccessibleName("Finished mosaic")
         self._message = WrapLabel("Generate a mosaic to see it here.")
+        make_secondary(self._message)
         self._message.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._stack = QStackedWidget()
         self._stack.addWidget(self._message)
@@ -224,11 +226,11 @@ class ResultPanel(QWidget):
 
         self.actual_btn = QPushButton("100%")
         self.actual_btn.setToolTip("One mosaic pixel per screen pixel")
+        self.actual_btn.setAccessibleName("Mosaic at actual size")
         self.actual_btn.clicked.connect(self._view.actual_size)
         buttons.addWidget(self.actual_btn)
 
         hint = HintLabel("Scroll to zoom, drag to pan")
-        hint.setEnabled(False)  # palette-aware secondary text
         hint.setAlignment(Qt.AlignmentFlag.AlignLeft
                           | Qt.AlignmentFlag.AlignVCenter)
         buttons.addWidget(hint, 1)
