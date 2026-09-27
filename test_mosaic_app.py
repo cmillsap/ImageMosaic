@@ -401,6 +401,38 @@ class TestScreenReaders:
             assert color != body
             assert contrast_ratio(color, background) >= 4.5
 
+    def test_no_label_has_a_hard_coded_colour(self, window, tmp_path):
+        # Fixed colours can't follow the theme or high contrast settings.
+        path = tmp_path / "wide.png"
+        Image.new('RGB', (300, 200)).save(path)
+        window.set_guide_image(str(path))
+        window.set_tile_folder(str(tmp_path / "gone"))
+        configure(window, 1, 1, 500, 500)
+        styled = [label.text() for label in window.findChildren(QLabel)
+                  if "color" in label.styleSheet()]
+        assert styled == []
+
+    def test_every_warning_has_a_symbol_as_well_as_colour(self, window,
+                                                          tmp_path):
+        path = tmp_path / "wide.png"
+        Image.new('RGB', (300, 200)).save(path)
+        window.set_guide_image(str(path))
+        window.set_tile_folder(str(tmp_path / "gone"))
+        configure(window, 1, 1, 500, 500)
+        problems = [window.tiles_status_label, window.grid_info_label]
+        for label in problems:
+            assert label.kind == "problem"
+            assert label.text().startswith("⚠ ")
+        assert window.stretch_label.text().startswith("⚠ ") or \
+            window.stretch_label.isHidden()
+
+    def test_warnings_are_readable(self, window, tmp_path):
+        background = window.palette().color(QPalette.ColorRole.Window)
+        window.set_tile_folder(str(tmp_path / "gone"))
+        color = window.tiles_status_label.palette().color(
+            QPalette.ColorRole.WindowText)
+        assert contrast_ratio(color, background) >= 4.5
+
     def test_photo_tick_is_heard_as_words(self, window, tmp_path):
         path = tmp_path / "sunset.jpg"
         Image.new('RGB', (400, 300)).save(path)

@@ -24,6 +24,14 @@ MIN_CONTRAST = 4.5
 # contrast floor is applied.
 SECONDARY_FADE = 0.35
 
+# QEvent::ThemeChange, sent when system colours or contrast settings
+# change. PyQt6's QEvent.Type doesn't list it.
+THEME_CHANGE = QEvent.Type(210)
+
+# Status colours as designed. Each is darkened or lightened as far as the
+# theme's background needs for it to stay readable.
+STATUS_COLORS = {"done": QColor("#2e8b57"), "problem": QColor("#e74c3c")}
+
 
 # ============================================================================
 # Colour and contrast
@@ -83,18 +91,52 @@ def secondary_text_color(palette: QPalette) -> QColor:
     return readable_color(mix(text, background, SECONDARY_FADE), background)
 
 
+def tone_color(tone: str, palette: QPalette) -> QColor:
+    """The text colour for tone ("secondary", "done", "problem" or None
+    for body text) on palette's background.
+
+    Under high contrast every tone is plain body text: the system theme's
+    colours are the ones the user can read, and symbols carry the meaning.
+    """
+    text = palette.color(QPalette.ColorRole.WindowText)
+    if tone is None or high_contrast():
+        return text
+    if tone == "secondary":
+        return secondary_text_color(palette)
+    return readable_color(STATUS_COLORS[tone],
+                          palette.color(QPalette.ColorRole.Window))
+
+
 class _ToneKeeper(QObject):
-    """Re-colours toned labels whenever their palette could have changed:
-    a theme switch, high contrast turned on, or a move to a new parent."""
+    """Re-colours toned labels whenever their colours could have changed:
+    a new palette, a system theme or contrast change (which need not come
+    with a new palette), or a move to a new parent."""
+
+    EVENTS = (QEvent.Type.PaletteChange, THEME_CHANGE,
+              QEvent.Type.ParentChange)
 
     def eventFilter(self, obj, event):
-        if event.type() in (QEvent.Type.PaletteChange,
-                            QEvent.Type.ParentChange):
+        if event.type() in self.EVENTS:
             _apply_tone(obj)
         return False
 
 
 _tone_keeper = None
+
+
+def set_tone(label: QLabel, tone: str) -> None:
+    """Colour label's text by tone, and keep it right as the theme changes.
+
+    tone is "secondary", "done", "problem", or None for body text.
+    """
+    global _tone_keeper
+    if _tone_keeper is None:
+        _tone_keeper = _ToneKeeper()
+    if label.property("tone_kept") is None:
+        label.installEventFilter(_tone_keeper)
+        label.setProperty("tone_kept", True)
+    label.setProperty("tone", tone)
+    _apply_tone(label)
 
 
 def make_secondary(label: QLabel) -> None:
@@ -103,12 +145,7 @@ def make_secondary(label: QLabel) -> None:
     Greying text by disabling the label would also tell screen readers
     it is unavailable, so the colour is set directly instead.
     """
-    global _tone_keeper
-    if _tone_keeper is None:
-        _tone_keeper = _ToneKeeper()
-    label.setProperty("tone", "secondary")
-    label.installEventFilter(_tone_keeper)
-    _apply_tone(label)
+    set_tone(label, "secondary")
 
 
 def _apply_tone(label: QLabel) -> None:
@@ -116,10 +153,7 @@ def _apply_tone(label: QLabel) -> None:
         return  # Our own setPalette below echoes back as a PaletteChange.
     parent = label.parentWidget()
     base = parent.palette() if parent else QApplication.palette()
-    if high_contrast():
-        color = base.color(QPalette.ColorRole.WindowText)
-    else:
-        color = secondary_text_color(base)
+    color = tone_color(label.property("tone"), base)
     palette = QPalette(label.palette())
     for group in (QPalette.ColorGroup.Active, QPalette.ColorGroup.Inactive):
         palette.setColor(group, QPalette.ColorRole.WindowText, color)
@@ -333,8 +367,6 @@ class StatusLabel(WrapLabel):
 
     SYMBOLS = {"done": "✓", "problem": "⚠"}
     SPOKEN = {"done": "Done", "problem": "Warning"}
-    STYLES = {"done": "QLabel { color: #2e8b57; }",
-              "problem": "QLabel { color: #e74c3c; }"}
 
     def __init__(self, wrap: bool = False, parent=None):
         super().__init__(parent=parent)
@@ -354,7 +386,7 @@ class StatusLabel(WrapLabel):
         if spoken is None:
             spoken = f"{self.SPOKEN[kind]}: {text}" if kind and text else text
         self.setAccessibleName(spoken)
-        self.setStyleSheet(self.STYLES.get(kind, ""))
+        set_tone(self, kind)
 
 
 def initial_window_rect(available: QRect, preferred: QSize) -> QRect:

@@ -11,12 +11,13 @@ from PIL import Image
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PyQt6.QtCore import QPointF, Qt
-from PyQt6.QtGui import QPalette, QPixmap
+from PyQt6.QtGui import QColor, QPalette, QPixmap
 from PyQt6.QtTest import QTest
 from PyQt6.QtWidgets import QApplication
 
 from result_viewer import (GridPreview, MAX_ZOOM, VIEW_KEYS, ResultPanel,
                            ZOOM_STEP, load_pixmap)
+from ui_support import contrast_ratio
 
 
 @pytest.fixture(scope="session")
@@ -195,6 +196,24 @@ def preview(qapp):
     qapp.processEvents()
     yield p
     p.close()
+
+
+@pytest.mark.parametrize("photo_color", ["white", "black", "#87ceeb"])
+def test_grid_shows_on_any_photo(preview, qapp, photo_color):
+    """A light line alone vanishes on a bright sky; the dark halo keeps it
+    visible there, and the light line keeps it visible on a dark photo."""
+    photo = QPixmap(300, 300)
+    photo.fill(QColor(photo_color))
+    preview.set_photo(photo)
+    preview.set_grid(3, 3, 100, 100)
+    qapp.processEvents()
+
+    image = preview.viewport().grab().toImage()
+    line_x = preview.mapFromScene(QPointF(100, 150)).x()
+    y = preview.mapFromScene(QPointF(100, 150)).y()
+    best = max(contrast_ratio(image.pixelColor(x, y), QColor(photo_color))
+               for x in range(line_x - 2, line_x + 3))
+    assert best >= 1.8
 
 
 def test_photo_is_stretched_over_the_whole_grid(preview):

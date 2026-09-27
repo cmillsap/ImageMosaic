@@ -11,15 +11,16 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import sys
 
-from PyQt6.QtCore import QRect, QSize
+from PyQt6.QtCore import QEvent, QRect, QSize
 from PyQt6.QtGui import QColor, QPalette
 from PyQt6.QtWidgets import QApplication, QLabel, QVBoxLayout, QWidget
 
 import ui_support
-from ui_support import (HintLabel, StatusLabel, WidestTextLabel, WrapLabel,
-                        announce, contrast_ratio, initial_window_rect,
-                        make_secondary, readable_color, refresh_scaled_fonts,
-                        scale_font, secondary_text_color, set_announcer)
+from ui_support import (THEME_CHANGE, HintLabel, StatusLabel,
+                        WidestTextLabel, WrapLabel, announce, contrast_ratio,
+                        initial_window_rect, make_secondary, readable_color,
+                        refresh_scaled_fonts, scale_font,
+                        secondary_text_color, set_announcer, tone_color)
 
 
 @pytest.fixture(scope="session")
@@ -290,6 +291,78 @@ class TestStatusLabel:
     def test_wraps_only_when_asked(self, qapp):
         assert not StatusLabel().wordWrap()
         assert StatusLabel(wrap=True).wordWrap()
+
+
+# ============================================================================
+# Status colours
+# ============================================================================
+
+def text_color(label):
+    return label.palette().color(QPalette.ColorGroup.Active,
+                                 QPalette.ColorRole.WindowText)
+
+
+class TestStatusColours:
+
+    @pytest.mark.parametrize("scheme", [LIGHT, DARK])
+    @pytest.mark.parametrize("tone", ["done", "problem", "secondary"])
+    def test_every_tone_is_readable(self, scheme, tone):
+        color = tone_color(tone, themed_palette(*scheme))
+        assert contrast_ratio(color, QColor(scheme[1])) >= 4.5
+
+    @pytest.mark.parametrize("scheme", [LIGHT, DARK])
+    def test_colours_keep_their_meaning(self, scheme):
+        palette = themed_palette(*scheme)
+        done = tone_color("done", palette)
+        problem = tone_color("problem", palette)
+        assert done.green() > done.red()
+        assert problem.red() > problem.green()
+
+    def test_body_text_for_no_tone(self):
+        palette = themed_palette(*LIGHT)
+        assert tone_color(None, palette) == QColor(LIGHT[0])
+
+    @pytest.mark.parametrize("tone", ["done", "problem", "secondary"])
+    def test_high_contrast_leaves_colour_to_the_system(self, tone,
+                                                       monkeypatch):
+        monkeypatch.setattr(ui_support, "high_contrast", lambda: True)
+        palette = themed_palette(*LIGHT)
+        assert tone_color(tone, palette) == QColor(LIGHT[0])
+
+    def test_status_label_follows_the_theme(self, qapp):
+        parent = QWidget()
+        parent.setPalette(themed_palette(*LIGHT))
+        label = StatusLabel(parent=parent)
+        label.set_status("Folder not found", "problem")
+        assert contrast_ratio(text_color(label), QColor(LIGHT[1])) >= 4.5
+
+        parent.setPalette(themed_palette(*DARK))
+        assert contrast_ratio(text_color(label), QColor(DARK[1])) >= 4.5
+
+    def test_clearing_a_problem_restores_body_text(self, qapp):
+        parent = QWidget()
+        parent.setPalette(themed_palette(*LIGHT))
+        label = StatusLabel(parent=parent)
+        label.set_status("No tiles fit", "problem")
+        label.set_status("60 × 90 grid")
+        assert text_color(label) == QColor(LIGHT[0])
+
+    def test_no_hard_coded_style(self, qapp):
+        label = StatusLabel()
+        label.set_status("Folder not found", "problem")
+        assert label.styleSheet() == ""
+
+    def test_turning_on_high_contrast_recolours(self, qapp, monkeypatch):
+        parent = QWidget()
+        parent.setPalette(themed_palette(*LIGHT))
+        label = StatusLabel(parent=parent)
+        label.set_status("Folder not found", "problem")
+        assert text_color(label) != QColor(LIGHT[0])
+
+        # The system announces the change with a ThemeChange event.
+        monkeypatch.setattr(ui_support, "high_contrast", lambda: True)
+        QApplication.sendEvent(label, QEvent(THEME_CHANGE))
+        assert text_color(label) == QColor(LIGHT[0])
 
 
 # ============================================================================

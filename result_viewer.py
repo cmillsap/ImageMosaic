@@ -14,7 +14,7 @@ actual pixels, panning by drag. The keyboard does the same: + and - zoom,
 import math
 import os
 
-from PyQt6.QtCore import Qt, QUrl
+from PyQt6.QtCore import QLineF, Qt, QUrl
 from PyQt6.QtGui import (QColor, QDesktopServices, QImageReader, QPainter,
                          QPalette, QPen, QPixmap, QTransform)
 from PyQt6.QtWidgets import (QGraphicsPixmapItem, QGraphicsScene,
@@ -40,6 +40,11 @@ VIEW_KEYS = ("Zoom with the mouse wheel or the + and - keys. 0 fits the "
 
 # Width of the ring drawn round a view that has keyboard focus.
 FOCUS_RING_PX = 2
+
+# Grid lines are drawn light over a wider dark halo, so they show on a
+# bright sky as well as a dark night: (colour, width in screen pixels).
+GRID_HALO = (QColor(0, 0, 0, 90), 3)
+GRID_LINE = (QColor(255, 255, 255, 170), 1)
 
 
 def load_pixmap(path: str) -> QPixmap:
@@ -225,10 +230,7 @@ class GridPreview(ZoomableImageView):
         width = self.cols * self.tile_width
         height = self.rows * self.tile_height
 
-        pen = QPen(QColor(255, 255, 255, 110))
-        pen.setCosmetic(True)  # one screen pixel wide at any zoom
-        painter.setPen(pen)
-
+        lines = []
         spacing = min(self.tile_width, self.tile_height) * self.zoom
         if spacing >= MIN_GRID_SPACING_PX:
             # Only the lines inside the exposed area; a fine grid on a large
@@ -237,14 +239,20 @@ class GridPreview(ZoomableImageView):
             last_col = min(self.cols - 1, math.ceil(rect.right() / self.tile_width))
             for c in range(first_col, last_col + 1):
                 x = c * self.tile_width
-                painter.drawLine(x, 0, x, height)
+                lines.append(QLineF(x, 0, x, height))
             first_row = max(1, math.floor(rect.top() / self.tile_height))
             last_row = min(self.rows - 1, math.ceil(rect.bottom() / self.tile_height))
             for r in range(first_row, last_row + 1):
                 y = r * self.tile_height
-                painter.drawLine(0, y, width, y)
+                lines.append(QLineF(0, y, width, y))
 
-        painter.drawRect(0, 0, width, height)
+        for color, pixels in (GRID_HALO, GRID_LINE):
+            pen = QPen(color)
+            pen.setWidth(pixels)
+            pen.setCosmetic(True)  # the same screen width at any zoom
+            painter.setPen(pen)
+            painter.drawLines(lines)
+            painter.drawRect(0, 0, width, height)
 
 
 class ResultPanel(QWidget):
