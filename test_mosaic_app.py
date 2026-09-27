@@ -47,6 +47,14 @@ def window(qapp, settings):
     w.close()
 
 
+def choose_tiles(window, path="tiles/", count=3):
+    """Stand in for choosing a tile folder that was scanned and found to
+    hold count images, without touching the disk."""
+    window.tile_folder_path = path
+    window.tile_count = count
+    window.check_ready_to_generate()
+
+
 def configure(window, out_w_in, out_h_in, tile_w, tile_h):
     """Drive the window through its spin boxes, as a user would."""
     window.width_spinbox.setValue(out_w_in)
@@ -208,8 +216,7 @@ class TestExistingControls:
         window.check_ready_to_generate()
         assert window.generate_btn.isEnabled() is False
 
-        window.tile_folder_path = "tiles/"
-        window.check_ready_to_generate()
+        choose_tiles(window)
         assert window.generate_btn.isEnabled() is True
 
     def test_progress_starts_hidden(self, window):
@@ -493,7 +500,8 @@ class TestAnnouncements:
         lifecycle._drain(window, qapp)
 
         texts = [t for t, _ in announcements]
-        assert texts[0] == "Generating mosaic"
+        # Everything from pressing Generate on; choosing inputs came before.
+        texts = texts[texts.index("Generating mosaic"):]
         # Each stage once, however many progress updates it sends.
         stages = texts[1:-1]
         assert len(stages) == len(set(stages)) > 0
@@ -591,8 +599,7 @@ class TestKeyboard:
         assert started == []    # Generate is disabled: nothing chosen.
 
         window.guide_image_path = "guide.png"
-        window.tile_folder_path = "tiles/"
-        window.check_ready_to_generate()
+        choose_tiles(window)
         window.shortcut_actions["generate"].trigger()
         assert started == [True]
         window.close()
@@ -873,7 +880,7 @@ class TestWorkerLifecycle:
         Image.new('RGB', (40, 40), (255, 0, 0)).save(guide)
 
         window.guide_image_path = guide
-        window.tile_folder_path = tiles
+        window.set_tile_folder(tiles)
         configure(window, 1, 1, 100, 100)     # 300x300 canvas -> 3x3 grid
 
         output = os.path.join(tmp, 'out.png')
@@ -1074,13 +1081,12 @@ class TestInputs:
         window.guide_image_path = "guide.png"
         window.check_ready_to_generate()
         assert "folder" in window.generate_hint_label.text()
-        window.tile_folder_path = "tiles"
-        window.check_ready_to_generate()
+        choose_tiles(window)
         assert window.generate_hint_label.isHidden() is True
 
     def test_no_tiles_fit_disables_generate(self, window):
         window.guide_image_path = "guide.png"
-        window.tile_folder_path = "tiles"
+        choose_tiles(window)
         configure(window, 1, 1, 400, 400)
         assert window.generate_btn.isEnabled() is False
         assert "smaller" in window.generate_hint_label.text()
@@ -1109,6 +1115,17 @@ class TestInputs:
         window.set_tile_folder(str(tmp_path / "gone"))
         assert window.tile_count is None
         assert "not found" in window.tiles_status_label.text()
+
+    def test_missing_tile_folder_blocks_generate(self, window, tmp_path):
+        window.guide_image_path = "guide.png"
+        window.set_tile_folder(str(tmp_path / "gone"))
+        assert window.generate_btn.isEnabled() is False
+        assert "can't be found" in window.generate_hint_label.text()
+
+        # Choosing a real folder afterwards clears it.
+        (tmp_path / "a.jpg").touch()
+        window.set_tile_folder(str(tmp_path))
+        assert window.generate_btn.isEnabled() is True
 
     def test_set_guide_image_shows_it(self, window, tmp_path):
         path = tmp_path / "sunset.jpg"

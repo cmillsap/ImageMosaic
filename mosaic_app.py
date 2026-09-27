@@ -1132,6 +1132,8 @@ class MosaicApp(QMainWindow):
             reason = "Choose a photo to turn into a mosaic."
         elif not self.tile_folder_path:
             reason = "Choose a folder of tile photos."
+        elif self.tile_count is None:
+            reason = "That tile folder can't be found. Choose another."
         elif self.tile_count == 0:
             reason = ("No images in that folder. Try including subfolders "
                       "or choose another.")
