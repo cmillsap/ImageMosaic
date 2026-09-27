@@ -9,7 +9,7 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                               QMessageBox, QComboBox, QSplitter, QScrollArea,
                               QTabWidget, QStackedWidget, QSlider, QToolButton,
                               QButtonGroup, QFrame)
-from PyQt6.QtCore import Qt, QThread, QStandardPaths, QSettings
+from PyQt6.QtCore import Qt, QThread, QStandardPaths, QSettings, QEvent, QSize
 from PyQt6.QtGui import QImage, QPixmap
 
 from image_io import open_image
@@ -123,6 +123,35 @@ def _secondary(text: str = "") -> QLabel:
     return label
 
 
+class _VerticalScrollArea(QScrollArea):
+    """A scroll area that never clips its content horizontally.
+
+    A plain QScrollArea with the horizontal scroll bar off will happily
+    shrink below its content's minimum width and cut off the right edge,
+    e.g. with large system fonts or a narrow splitter. This one asks for
+    enough width to show the content plus the vertical scroll bar.
+    """
+
+    def setWidget(self, widget):
+        super().setWidget(widget)
+        # Hiding or showing rows changes the width needed; re-ask then.
+        widget.installEventFilter(self)
+
+    def eventFilter(self, obj, event):
+        if obj is self.widget() and event.type() == QEvent.Type.LayoutRequest:
+            self.updateGeometry()
+        return super().eventFilter(obj, event)
+
+    def minimumSizeHint(self) -> QSize:
+        hint = super().minimumSizeHint()
+        if self.widget() is None:
+            return hint
+        needed = (self.widget().minimumSizeHint().width()
+                  + self.verticalScrollBar().sizeHint().width()
+                  + 2 * self.frameWidth())
+        return QSize(max(hint.width(), needed), hint.height())
+
+
 class MosaicApp(QMainWindow):
     def __init__(self, settings: QSettings = None):
         super().__init__()
@@ -188,14 +217,13 @@ class MosaicApp(QMainWindow):
             column.addWidget(_divider())
         column.addStretch()
 
-        scroll = QScrollArea()
+        scroll = _VerticalScrollArea()
         scroll.setWidget(sections)
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
 
         sidebar = QWidget()
-        sidebar.setMinimumWidth(320)
         layout = QVBoxLayout(sidebar)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)

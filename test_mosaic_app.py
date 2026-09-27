@@ -12,7 +12,7 @@ from PIL import Image
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PyQt6.QtCore import QThread, QStandardPaths, QSettings
-from PyQt6.QtWidgets import QApplication, QFileDialog, QMessageBox
+from PyQt6.QtWidgets import QApplication, QFileDialog, QMessageBox, QScrollArea
 
 from mosaic_app import LOOK_PRESETS, PRINT_SIZES, MosaicApp
 from result_viewer import ResultPanel
@@ -207,6 +207,30 @@ class TestExistingControls:
 
     def test_progress_starts_hidden(self, window):
         assert window.progress_widget.isHidden() is True
+
+
+# ============================================================================
+# The sidebar must never cut off its rightmost controls
+# ============================================================================
+
+class TestSidebarWidth:
+
+    @pytest.mark.parametrize("point_size", [9, 11, 14])
+    def test_squeezed_sidebar_still_fits_its_settings(self, qapp, window,
+                                                      point_size):
+        # Large system fonts widen the rows; dragging the splitter hard
+        # left is the narrowest the user can make the sidebar.
+        font = window.font()
+        font.setPointSize(point_size)
+        window.setFont(font)
+        window.show()
+        qapp.processEvents()
+        window.centralWidget().setSizes([0, 5000])
+        qapp.processEvents()
+
+        scroll = window.findChild(QScrollArea)
+        assert (scroll.viewport().width()
+                >= scroll.widget().minimumSizeHint().width())
 
 
 # ============================================================================
