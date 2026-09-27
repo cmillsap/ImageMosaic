@@ -65,22 +65,37 @@ silently disables itself and every tile falls back to a centre crop.
 python mosaic_app.py
 ```
 
-1. **Select Guide Image** - the picture the mosaic will reproduce.
-2. **Browse** to the folder of tile images, ticking *Include subdirectories*
-   to scan nested folders.
-3. Set the **tile size** in pixels. This fixes both the shape each tile is
-   cropped to and the size of each guide grid cell, and the panel shows the
-   resulting grid, e.g. `Grid: 60 x 90 = 5,400 tiles`.
-4. Optionally limit repetition (see below).
-5. Set the **output size** in inches; output is rendered at 300 DPI.
-   Mosaics are saved to your Documents folder as `<guide name>_mosaic.png`;
-   use **Browse** next to *Save to* to pick another folder (remembered next
-   time), and the format box for JPEG or TIFF. An existing file is never
-   overwritten - a repeat run is numbered instead.
-6. **Generate Mosaic** and watch the progress bar. When it finishes, the
-   mosaic opens in its own window: scroll to zoom, drag to pan, and close
-   it when you are done.
-   Generation runs on a background thread and can be cancelled at any time.
+The window has settings in a sidebar on the left and a live preview on
+the right. Work down the sidebar:
+
+1. **Photo** - **Choose Photo…**, or drop a photo on the preview. It is
+   shown with the tile grid drawn over it, exactly as the renderer will cut
+   it into cells.
+2. **Tile photos** - **Choose…** the folder of tile photos, or drop the
+   folder on the preview. The heading shows how many images were found;
+   tick *Include subfolders* to scan nested folders too.
+3. **Print size** - a common size, or *Custom…* to enter your own in
+   inches, with **⇄** to swap portrait and landscape. Output is rendered at
+   300 DPI. If the photo's shape differs from the print's, a warning says
+   how far it will be stretched to fit.
+4. **Tiles** - the tile size in pixels and a shape: 1:1, 4:3, 3:2, or
+   *Custom* to set the height too. Together these fix the shape each tile
+   is cropped to and the size of each grid cell, and the section shows the
+   resulting grid, e.g. `60 × 90 grid = 5,400 tiles`.
+5. **Look** - *Accurate*, *Balanced* or *Varied*, or set Variety and Tint
+   yourself, with hard limits under *Advanced* (see below).
+6. **Generate Mosaic**. Mosaics are saved to your Documents folder as
+   `<photo name>_mosaic.png`; **Change…** beside *Save to* picks another
+   folder (remembered next time), and the box beside *As* offers JPEG and
+   TIFF. An existing file is never overwritten - a repeat run is numbered
+   instead. Until Generate can run, the text beneath it says what is
+   missing.
+
+The render runs in the background, with its progress in the status bar,
+and **Cancel** stops it at any time. When it finishes, the mosaic opens in
+the preview's *Mosaic* tab: scroll to zoom, drag to pan, **Fit** and
+**100%** to jump between the whole mosaic and its actual pixels, and
+**Open Folder** to find the file.
 
 ### Keyboard and accessibility
 
@@ -106,8 +121,13 @@ new warning, each render stage, the saved file) are announced.
 ### Controlling repetition
 
 A plain nearest-neighbour match reuses one photo across any large flat area
-of the guide - a clear sky becomes the same image hundreds of times. Two
-optional limits counter this:
+of the guide - a clear sky becomes the same image hundreds of times. The
+**Look** presets are starting points for the settings below: *Accurate*
+matches colour as closely as possible, *Balanced* spreads repeats out with
+a light tint, and *Varied* shows as much of the library as it can.
+Changing any of these settings afterwards shows *Custom*.
+
+Two optional limits, under *Advanced*, counter repetition directly:
 
 - **Max uses per image** caps how often one photo may appear.
 - **Min gap between repeats** keeps copies of a photo at least that many
@@ -119,7 +139,8 @@ Tighter limits mean more variety but looser colour matching, and a cap that
 is arithmetically impossible (fewer tiles x uses than cells) is reported in
 the log.
 
-Three further settings work alongside the limits:
+Three further settings work alongside the limits (the last is also under
+*Advanced*):
 
 - **Variety** (0-100) is a gentler alternative to a hard cap. Every use of
   a photo adds a small penalty to its colour distance, so once the best
@@ -135,7 +156,7 @@ Three further settings work alongside the limits:
   | 75 | 329 | 61x | 281 |
   | 100 | 389 | 34x | 300 |
 
-- **Colour tint** (0-100%) shifts each photo's colours toward the part of
+- **Tint** (0-100%) shifts each photo's colours toward the part of
   the guide it covers, section by section of the 3x3 grid. The shift is
   added to every pixel rather than blended in, so the photo keeps its
   detail. Tinting is what makes a high Variety setting usable: loosely
