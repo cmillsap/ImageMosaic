@@ -82,6 +82,27 @@ python mosaic_app.py
    it when you are done.
    Generation runs on a background thread and can be cancelled at any time.
 
+### Keyboard and accessibility
+
+Everything can be done from the keyboard. Tab moves through the settings
+top to bottom and then to the preview, and underlined letters work with
+Alt (Alt+P for the photo, Alt+V for Variety, and so on).
+
+| Key | Action |
+| --- | --- |
+| Ctrl+O | Choose the photo |
+| Ctrl+Shift+O | Choose the tile photos folder |
+| Ctrl+Enter | Generate the mosaic |
+| Esc | Cancel a render in progress |
+
+With the photo or mosaic preview focused, **+** and **-** zoom, **0** fits
+the image to the view, **1** shows actual pixels, and the arrow keys pan.
+
+The window follows the Windows text size and display scaling settings,
+and adapts to high contrast themes. Every control is named for screen
+readers, and changes that happen out of view (the tile photo count, a
+new warning, each render stage, the saved file) are announced.
+
 ### Controlling repetition
 
 A plain nearest-neighbour match reuses one photo across any large flat area

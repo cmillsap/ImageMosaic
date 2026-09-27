@@ -7,7 +7,8 @@ grid drawn over it, and the finished mosaic.
 A mosaic is only interesting at two scales: from across the room, where the
 guide image appears, and nose-to-the-glass, where the individual photos do.
 Both views open fitted to the space and zoom with the mouse wheel down to
-actual pixels, panning by drag.
+actual pixels, panning by drag. The keyboard does the same: + and - zoom,
+0 fits, 1 shows actual pixels, and the arrow keys pan.
 """
 
 import math
@@ -15,7 +16,7 @@ import os
 
 from PyQt6.QtCore import Qt, QUrl
 from PyQt6.QtGui import (QColor, QDesktopServices, QImageReader, QPainter,
-                         QPen, QPixmap, QTransform)
+                         QPalette, QPen, QPixmap, QTransform)
 from PyQt6.QtWidgets import (QGraphicsPixmapItem, QGraphicsScene,
                              QGraphicsView, QHBoxLayout, QLabel, QPushButton,
                              QStackedWidget, QVBoxLayout, QWidget)
@@ -30,6 +31,15 @@ MAX_ZOOM = 8.0
 # Grid lines closer together than this on screen blur into a flat tint, so
 # below it only the outline is drawn.
 MIN_GRID_SPACING_PX = 4
+
+# The tip shown under both views, and their keyboard controls.
+VIEW_HINT = "Scroll or +/- to zoom, drag or arrow keys to pan"
+VIEW_KEYS = ("Zoom with the mouse wheel or the + and - keys. 0 fits the "
+             "image to the view, 1 shows actual pixels. Drag or use the "
+             "arrow keys to pan.")
+
+# Width of the ring drawn round a view that has keyboard focus.
+FOCUS_RING_PX = 2
 
 
 def load_pixmap(path: str) -> QPixmap:
@@ -48,7 +58,8 @@ def load_pixmap(path: str) -> QPixmap:
 
 
 class ZoomableImageView(QGraphicsView):
-    """A QGraphicsView that zooms under the cursor and pans by drag."""
+    """A QGraphicsView that zooms under the cursor and pans by drag, or
+    from the keyboard once it has focus."""
 
     def __init__(self, pixmap: QPixmap = None, parent=None):
         super().__init__(parent)
@@ -61,6 +72,9 @@ class ZoomableImageView(QGraphicsView):
         self.setTransformationAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
         self.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
         self.setBackgroundBrush(Qt.GlobalColor.darkGray)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setToolTip(VIEW_KEYS)
+        self.setAccessibleDescription(VIEW_KEYS)
         # Stays in "fit" mode, refitting on resize, until the user zooms.
         self._fitted = True
         if pixmap is not None:
@@ -114,6 +128,50 @@ class ZoomableImageView(QGraphicsView):
         delta = event.angleDelta().y()
         if delta:
             self.zoom_by(ZOOM_STEP if delta > 0 else 1 / ZOOM_STEP)
+
+    def keyPressEvent(self, event):
+        key = event.key()
+        if key in (Qt.Key.Key_Plus, Qt.Key.Key_Equal):
+            self._zoom_from_keyboard(ZOOM_STEP)
+        elif key in (Qt.Key.Key_Minus, Qt.Key.Key_Underscore):
+            self._zoom_from_keyboard(1 / ZOOM_STEP)
+        elif key == Qt.Key.Key_0:
+            self.fit()
+        elif key == Qt.Key.Key_1:
+            self.actual_size()
+        else:
+            # Arrows and Page Up/Down pan, via the scroll bars.
+            super().keyPressEvent(event)
+
+    def _zoom_from_keyboard(self, factor: float) -> None:
+        # The mouse could be anywhere, so zoom about the middle instead.
+        self.setTransformationAnchor(QGraphicsView.ViewportAnchor.AnchorViewCenter)
+        try:
+            self.zoom_by(factor)
+        finally:
+            self.setTransformationAnchor(
+                QGraphicsView.ViewportAnchor.AnchorUnderMouse)
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        if self.hasFocus():
+            # Without a ring, nothing shows where the keyboard focus is.
+            painter = QPainter(self.viewport())
+            pen = QPen(self.palette().color(QPalette.ColorRole.Highlight))
+            pen.setWidth(FOCUS_RING_PX)
+            pen.setJoinStyle(Qt.PenJoinStyle.MiterJoin)
+            painter.setPen(pen)
+            inset = FOCUS_RING_PX // 2
+            painter.drawRect(self.viewport().rect().adjusted(
+                inset, inset, -inset, -inset))
+
+    def focusInEvent(self, event):
+        super().focusInEvent(event)
+        self.viewport().update()
+
+    def focusOutEvent(self, event):
+        super().focusOutEvent(event)
+        self.viewport().update()
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -230,12 +288,12 @@ class ResultPanel(QWidget):
         self.actual_btn.clicked.connect(self._view.actual_size)
         buttons.addWidget(self.actual_btn)
 
-        hint = HintLabel("Scroll to zoom, drag to pan")
+        hint = HintLabel(VIEW_HINT)
         hint.setAlignment(Qt.AlignmentFlag.AlignLeft
                           | Qt.AlignmentFlag.AlignVCenter)
         buttons.addWidget(hint, 1)
 
-        self.folder_btn = QPushButton("Open Folder")
+        self.folder_btn = QPushButton("Open &Folder")
         self.folder_btn.clicked.connect(self.open_folder)
         buttons.addWidget(self.folder_btn)
         layout.addLayout(buttons)

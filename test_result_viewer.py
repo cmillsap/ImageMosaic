@@ -10,10 +10,13 @@ from PIL import Image
 # Qt needs an offscreen platform plugin under CI / headless runs.
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PyQt6.QtGui import QPixmap
+from PyQt6.QtCore import QPointF, Qt
+from PyQt6.QtGui import QPalette, QPixmap
+from PyQt6.QtTest import QTest
 from PyQt6.QtWidgets import QApplication
 
-from result_viewer import GridPreview, MAX_ZOOM, ResultPanel, load_pixmap
+from result_viewer import (GridPreview, MAX_ZOOM, VIEW_KEYS, ResultPanel,
+                           ZOOM_STEP, load_pixmap)
 
 
 @pytest.fixture(scope="session")
@@ -104,6 +107,80 @@ def test_a_second_result_replaces_the_first(viewer, tmp_path, qapp):
     qapp.processEvents()
     rect = viewer.view.sceneRect()
     assert (rect.width(), rect.height()) == (300, 600)
+
+
+# ============================================================================
+# Keyboard control of the views
+# ============================================================================
+
+def centre_in_scene(view):
+    return view.mapToScene(view.viewport().rect().center())
+
+
+def test_plus_and_minus_zoom(viewer):
+    view = viewer.view
+    fitted = view.zoom
+    QTest.keyClick(view, Qt.Key.Key_Plus)
+    assert view.zoom == pytest.approx(fitted * ZOOM_STEP)
+    QTest.keyClick(view, Qt.Key.Key_Equal)   # + without Shift
+    assert view.zoom == pytest.approx(fitted * ZOOM_STEP ** 2)
+    QTest.keyClick(view, Qt.Key.Key_Minus)
+    assert view.zoom == pytest.approx(fitted * ZOOM_STEP)
+
+
+def test_zero_fits_and_one_is_actual_size(viewer):
+    view = viewer.view
+    fitted = view.zoom
+    QTest.keyClick(view, Qt.Key.Key_1)
+    assert view.zoom == 1.0
+    QTest.keyClick(view, Qt.Key.Key_0)
+    assert view.zoom == pytest.approx(fitted)
+
+
+def test_keyboard_zoom_keeps_the_middle_in_place(viewer):
+    view = viewer.view
+    QTest.keyClick(view, Qt.Key.Key_1)
+    view.centerOn(QPointF(700, 400))
+    before = centre_in_scene(view)
+    QTest.keyClick(view, Qt.Key.Key_Plus)
+    after = centre_in_scene(view)
+    assert after.x() == pytest.approx(before.x(), abs=2)
+    assert after.y() == pytest.approx(before.y(), abs=2)
+
+
+def test_arrow_keys_pan(viewer):
+    view = viewer.view
+    QTest.keyClick(view, Qt.Key.Key_1)
+    bar = view.horizontalScrollBar()
+    start = bar.value()
+    QTest.keyClick(view, Qt.Key.Key_Right)
+    assert bar.value() > start
+
+
+def test_view_takes_keyboard_focus(viewer):
+    assert viewer.view.focusPolicy() & Qt.FocusPolicy.TabFocus
+
+
+def test_focus_ring_shows_where_the_keyboard_is(viewer, qapp):
+    view = viewer.view
+    viewer.activateWindow()
+    view.setFocus()
+    qapp.processEvents()
+    if not view.hasFocus():
+        pytest.skip("platform won't give an offscreen window focus")
+    highlight = view.palette().color(QPalette.ColorRole.Highlight)
+    corner = view.viewport().grab().toImage().pixelColor(0, 0)
+    assert corner == highlight
+
+    view.clearFocus()
+    qapp.processEvents()
+    corner = view.viewport().grab().toImage().pixelColor(0, 0)
+    assert corner != highlight
+
+
+def test_keys_are_described_to_everyone(viewer):
+    assert viewer.view.toolTip() == VIEW_KEYS
+    assert viewer.view.accessibleDescription() == VIEW_KEYS
 
 
 # ============================================================================

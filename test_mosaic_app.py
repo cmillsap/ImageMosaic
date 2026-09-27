@@ -12,7 +12,7 @@ from PIL import Image
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PyQt6.QtCore import QThread, QStandardPaths, QSettings, Qt
-from PyQt6.QtGui import QPalette
+from PyQt6.QtGui import QKeySequence, QPalette
 from PyQt6.QtWidgets import (QAbstractButton, QAbstractSpinBox, QApplication,
                              QComboBox, QFileDialog, QGraphicsView, QLabel,
                              QLineEdit, QMessageBox, QProgressBar, QScrollArea,
@@ -20,6 +20,7 @@ from PyQt6.QtWidgets import (QAbstractButton, QAbstractSpinBox, QApplication,
 
 from mosaic_app import LOOK_PRESETS, PRINT_SIZES, MosaicApp
 import ui_support
+from mosaic_app import SHORTCUTS
 from result_viewer import ResultPanel
 from ui_support import HintLabel, contrast_ratio
 from tile_preprocessor import PreprocessorConfig
@@ -365,7 +366,7 @@ class TestScreenReaders:
         assert window.tile_shape_buttons[1].accessibleName() == "4:3 tile shape"
 
     def test_visible_labels_are_tied_to_their_inputs(self, window):
-        buddies = {label.text(): label.buddy()
+        buddies = {label.text().replace("&", ""): label.buddy()
                    for label in window.findChildren(QLabel) if label.buddy()}
         assert buddies["Max uses per image"] is window.max_reuse_spinbox
         assert buddies["Variety"] is window.variety_slider
@@ -470,6 +471,129 @@ class TestAnnouncements:
     def test_cancel(self, window, announcements):
         window.on_render_cancelled()
         assert announcements == [("Mosaic cancelled", False)]
+
+
+# ============================================================================
+# Everything reachable, and quickly, from the keyboard
+# ============================================================================
+
+def tab_stops(window):
+    """Visible widgets that Tab lands on, in the order it visits them."""
+    stops, widget = [], window.select_image_btn
+    while True:
+        if widget.isVisible() and (widget.focusPolicy()
+                                   & Qt.FocusPolicy.TabFocus):
+            stops.append(widget)
+        widget = widget.nextInFocusChain()
+        if widget is window.select_image_btn:
+            return stops
+
+
+def mnemonic(text):
+    """The Alt access key marked in text with a single &, else None."""
+    i = text.replace("&&", "").find("&")
+    return text.replace("&&", "")[i + 1].lower() if i >= 0 else None
+
+
+class TestKeyboard:
+
+    def test_tab_follows_the_screen_top_to_bottom(self, qapp, window,
+                                                  tmp_path):
+        path = tmp_path / "photo.png"
+        Image.new('RGB', (200, 300)).save(path)
+        window.set_guide_image(str(path))
+        window.print_size_combo.setCurrentIndex(
+            window.print_size_combo.count() - 1)
+        window.tile_shape_buttons[-1].click()
+        window.advanced_toggle.setChecked(True)
+        window.show()
+        settle(qapp)
+
+        expected = [
+            window.select_image_btn, window.tiles_browse_btn,
+            window.subdirs_checkbox, window.print_size_combo,
+            window.orientation_btn, window.width_spinbox,
+            window.height_spinbox, window.tile_width_spinbox,
+            *window.tile_shape_buttons, window.tile_height_spinbox,
+            *window.look_buttons.values(), window.variety_slider,
+            window.tint_slider, window.advanced_toggle,
+            window.max_reuse_spinbox, window.min_distance_spinbox,
+            window.randomize_order_checkbox, window.output_folder_edit,
+            window.output_format_combo, window.generate_btn,
+            window.grid_preview, window.show_grid_checkbox,
+        ]
+        stops = tab_stops(window)
+        assert [w for w in stops if w in expected] == expected
+
+    def test_scroll_area_is_not_a_tab_stop(self, qapp, window):
+        window.show()
+        settle(qapp)
+        assert window.findChild(QScrollArea) not in tab_stops(window)
+
+    def test_shortcut_keys(self, window):
+        for name, keys in SHORTCUTS.items():
+            bound = window.shortcut_actions[name].shortcuts()
+            assert bound == [QKeySequence(k) for k in keys]
+
+    def test_choose_photo_shortcut(self, window, monkeypatch):
+        opened = []
+        monkeypatch.setattr(QFileDialog, 'getOpenFileName',
+                            lambda *a, **k: opened.append(a) or ("", ""))
+        window.shortcut_actions["choose_photo"].trigger()
+        assert opened
+
+    def test_choose_tiles_shortcut(self, window, monkeypatch):
+        opened = []
+        monkeypatch.setattr(QFileDialog, 'getExistingDirectory',
+                            lambda *a, **k: opened.append(a) or "")
+        window.shortcut_actions["choose_tiles"].trigger()
+        assert opened
+
+    def test_generate_shortcut_only_when_ready(self, qapp, settings,
+                                               monkeypatch):
+        started = []
+        monkeypatch.setattr(MosaicApp, 'generate_mosaic',
+                            lambda self: started.append(True))
+        window = MosaicApp(settings)
+        window.shortcut_actions["generate"].trigger()
+        assert started == []    # Generate is disabled: nothing chosen.
+
+        window.guide_image_path = "guide.png"
+        window.tile_folder_path = "tiles/"
+        window.check_ready_to_generate()
+        window.shortcut_actions["generate"].trigger()
+        assert started == [True]
+        window.close()
+
+    def test_escape_cancels(self, qapp, settings, monkeypatch):
+        cancelled = []
+        monkeypatch.setattr(MosaicApp, 'cancel_mosaic',
+                            lambda self: cancelled.append(True))
+        window = MosaicApp(settings)
+        window.shortcut_actions["cancel"].trigger()
+        assert cancelled == [True]
+        window.close()
+
+    def test_tooltips_mention_the_shortcut(self, window):
+        assert "Ctrl+O" in window.select_image_btn.toolTip()
+        assert "Ctrl+Return" in window.generate_btn.toolTip()
+
+    def test_access_keys_are_unique(self, window):
+        texts = [b.text() for b in window.findChildren(QAbstractButton)]
+        texts += [label.text() for label in window.findChildren(QLabel)
+                  if label.buddy()]
+        keys = [k for k in map(mnemonic, texts) if k]
+        assert len(keys) == len(set(keys)), sorted(keys)
+        assert len(keys) >= 15
+
+    def test_access_keys_on_labels_reach_an_input(self, window):
+        for label in window.findChildren(QLabel):
+            if mnemonic(label.text()):
+                assert label.buddy() is not None, label.text()
+
+    def test_custom_tile_width_keeps_a_unique_access_key(self, window):
+        window.tile_shape_buttons[-1].click()
+        self.test_access_keys_are_unique(window)
 
 
 # ============================================================================
@@ -859,7 +983,7 @@ class TestTileShape:
     def test_custom_button_reveals_height(self, window):
         window.tile_shape_buttons[-1].click()
         assert window.custom_tile_row.isHidden() is False
-        assert window.tile_size_label.text() == "Width"
+        assert window.tile_size_label.text().replace("&", "") == "Width"
 
 
 # ============================================================================

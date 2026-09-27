@@ -10,11 +10,11 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                               QTabWidget, QStackedWidget, QSlider, QToolButton,
                               QButtonGroup, QFrame, QGridLayout, QSizePolicy)
 from PyQt6.QtCore import Qt, QThread, QStandardPaths, QSettings, QEvent, QSize
-from PyQt6.QtGui import QImage, QPixmap
+from PyQt6.QtGui import QAction, QImage, QKeySequence, QPixmap
 
 from image_io import open_image
 from mosaic_worker import MosaicJob, MosaicWorker
-from result_viewer import GridPreview, ResultPanel
+from result_viewer import VIEW_HINT, GridPreview, ResultPanel
 from tile_database import find_tile_files
 from tile_preprocessor import PreprocessorConfig
 from ui_support import (HintLabel, StatusLabel, WidestTextLabel, WrapLabel,
@@ -30,6 +30,18 @@ PRINT_SIZES = [(8, 10), (11, 14), (16, 20), (18, 24), (20, 30), (24, 36)]
 
 # Tile shapes offered as buttons, as (label, width part, height part).
 TILE_SHAPES = [("1:1", 1, 1), ("4:3", 4, 3), ("3:2", 3, 2)]
+
+# Keyboard shortcuts, as (keys, what they do). Listed in the README too.
+SHORTCUTS = {
+    "choose_photo": ["Ctrl+O"],
+    "choose_tiles": ["Ctrl+Shift+O"],
+    "generate": ["Ctrl+Return", "Ctrl+Enter"],
+    "cancel": ["Esc"],
+}
+
+# Look preset buttons with their Alt access keys marked.
+LOOK_BUTTON_TEXT = {"Accurate": "Acc&urate", "Balanced": "&Balanced",
+                    "Varied": "Var&ied"}
 
 # Look presets: named starting points for the four matching controls.
 # Any edit to one of those controls drops back to "custom".
@@ -218,6 +230,7 @@ class MosaicApp(QMainWindow):
         self.setCentralWidget(splitter)
 
         self._build_status_bar()
+        self._build_shortcuts()
         refresh_scaled_fonts(self)
 
         # Every widget exists now, so it is safe to populate the readouts.
@@ -242,6 +255,8 @@ class MosaicApp(QMainWindow):
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        # Tabbing reaches the settings inside; the area itself is no stop.
+        scroll.setFocusPolicy(Qt.FocusPolicy.NoFocus)
 
         sidebar = QWidget()
         layout = QVBoxLayout(sidebar)
@@ -274,7 +289,7 @@ class MosaicApp(QMainWindow):
         row.addLayout(details, 1)
         layout.addLayout(row)
 
-        self.select_image_btn = QPushButton("Choose Photo…")
+        self.select_image_btn = QPushButton("Choose &Photo…")
         self.select_image_btn.clicked.connect(self.select_guide_image)
         layout.addWidget(self.select_image_btn)
         return box
@@ -288,13 +303,13 @@ class MosaicApp(QMainWindow):
         self.folder_path_edit.setReadOnly(True)
         self.folder_path_edit.setAccessibleName("Tile photos folder")
         row.addWidget(self.folder_path_edit)
-        browse_btn = QPushButton("Choose…")
-        browse_btn.setAccessibleName("Choose tile photos folder")
-        browse_btn.clicked.connect(self.select_tile_folder)
-        row.addWidget(browse_btn)
+        self.tiles_browse_btn = QPushButton("&Choose…")
+        self.tiles_browse_btn.setAccessibleName("Choose tile photos folder")
+        self.tiles_browse_btn.clicked.connect(self.select_tile_folder)
+        row.addWidget(self.tiles_browse_btn)
         layout.addLayout(row)
 
-        self.subdirs_checkbox = QCheckBox("Include subfolders")
+        self.subdirs_checkbox = QCheckBox("Include &subfolders")
         self.subdirs_checkbox.setChecked(False)
         self.subdirs_checkbox.stateChanged.connect(self.update_scan_subdirectories)
         layout.addWidget(self.subdirs_checkbox)
@@ -326,14 +341,15 @@ class MosaicApp(QMainWindow):
         custom = QHBoxLayout(self.custom_print_row)
         custom.setContentsMargins(0, 0, 0, 0)
         self.width_spinbox = QSpinBox()
-        custom.addWidget(_label_for(self.width_spinbox, "Width", "Print width"))
+        custom.addWidget(_label_for(self.width_spinbox, "&Width",
+                                    "Print width"))
         self.width_spinbox.setRange(1, 100)
         self.width_spinbox.setSuffix(" in")
         self.width_spinbox.setValue(self.output_width_inches)
         self.width_spinbox.valueChanged.connect(self.on_print_dimension_edited)
         custom.addWidget(self.width_spinbox)
         self.height_spinbox = QSpinBox()
-        custom.addWidget(_label_for(self.height_spinbox, "Height",
+        custom.addWidget(_label_for(self.height_spinbox, "&Height",
                                     "Print height"))
         self.height_spinbox.setRange(1, 100)
         self.height_spinbox.setSuffix(" in")
@@ -360,7 +376,7 @@ class MosaicApp(QMainWindow):
 
         row = QHBoxLayout()
         self.tile_width_spinbox = QSpinBox()
-        self.tile_size_label = _label_for(self.tile_width_spinbox, "Size",
+        self.tile_size_label = _label_for(self.tile_width_spinbox, "Si&ze",
                                           "Tile size")
         row.addWidget(self.tile_size_label)
         self.tile_width_spinbox.setRange(8, 2000)
@@ -395,7 +411,7 @@ class MosaicApp(QMainWindow):
         custom = QHBoxLayout(self.custom_tile_row)
         custom.setContentsMargins(0, 0, 0, 0)
         self.tile_height_spinbox = QSpinBox()
-        custom.addWidget(_label_for(self.tile_height_spinbox, "Height",
+        custom.addWidget(_label_for(self.tile_height_spinbox, "H&eight",
                                     "Tile height"))
         self.tile_height_spinbox.setRange(8, 2000)
         self.tile_height_spinbox.setSuffix(" px")
@@ -429,7 +445,7 @@ class MosaicApp(QMainWindow):
             "Varied": "Shows as much of your library as possible.",
         }
         for name in LOOK_PRESETS:
-            btn = QPushButton(name)
+            btn = QPushButton(LOOK_BUTTON_TEXT[name])
             btn.setCheckable(True)
             btn.setToolTip(tips[name])
             btn.clicked.connect(lambda _, n=name: self.apply_look_preset(n))
@@ -445,20 +461,20 @@ class MosaicApp(QMainWindow):
         sliders.setColumnStretch(1, 1)
         layout.addLayout(sliders)
         self.variety_slider, self.variety_value_label = self._add_slider(
-            sliders, "Variety",
+            sliders, "&Variety",
             "Favour images that have been used less.\n"
             "Each use makes an image slightly less likely to be picked again,\n"
             "so more of your library appears at some cost to colour accuracy.",
             suffix="")
         self.tint_slider, self.tint_value_label = self._add_slider(
-            sliders, "Tint",
+            sliders, "&Tint",
             "Shift each image's colours toward the part of the guide it covers.\n"
             "Makes loosely matched images read correctly, so Variety can be\n"
             "raised without the mosaic going muddy. 15-30% is usually subtle.",
             suffix="%")
 
         self.advanced_toggle = QToolButton()
-        self.advanced_toggle.setText("Advanced")
+        self.advanced_toggle.setText("&Advanced")
         self.advanced_toggle.setCheckable(True)
         self.advanced_toggle.setToolButtonStyle(
             Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
@@ -475,7 +491,7 @@ class MosaicApp(QMainWindow):
         # reuses one photo across every flat area of the guide.
         row = QHBoxLayout()
         self.max_reuse_spinbox = QSpinBox()
-        row.addWidget(_label_for(self.max_reuse_spinbox, "Max uses per image"))
+        row.addWidget(_label_for(self.max_reuse_spinbox, "&Max uses per image"))
         row.addStretch()
         self.max_reuse_spinbox.setRange(0, 9999)
         self.max_reuse_spinbox.setValue(0)
@@ -491,7 +507,7 @@ class MosaicApp(QMainWindow):
         row = QHBoxLayout()
         self.min_distance_spinbox = QSpinBox()
         row.addWidget(_label_for(self.min_distance_spinbox,
-                                 "Min gap between repeats"))
+                                 "Mi&n gap between repeats"))
         row.addStretch()
         self.min_distance_spinbox.setRange(0, 50)
         self.min_distance_spinbox.setValue(0)
@@ -504,7 +520,7 @@ class MosaicApp(QMainWindow):
         row.addWidget(self.min_distance_spinbox)
         advanced.addLayout(row)
 
-        self.randomize_order_checkbox = QCheckBox("Randomize placement order")
+        self.randomize_order_checkbox = QCheckBox("&Randomize placement order")
         self.randomize_order_checkbox.setChecked(True)
         self.randomize_order_checkbox.setToolTip(
             "Fill cells in a shuffled order rather than row by row. When\n"
@@ -570,7 +586,7 @@ class MosaicApp(QMainWindow):
         row.addWidget(self.output_format_combo)
         layout.addLayout(row)
 
-        self.generate_btn = QPushButton("Generate Mosaic")
+        self.generate_btn = QPushButton("&Generate Mosaic")
         self.generate_btn.setEnabled(False)
         self.generate_btn.setDefault(True)
         self.generate_btn.setStyleSheet("QPushButton { padding: 10px; }")
@@ -611,14 +627,14 @@ class MosaicApp(QMainWindow):
         self.preview_controls = QWidget()
         controls = QHBoxLayout(self.preview_controls)
         controls.setContentsMargins(8, 4, 8, 4)
-        self.show_grid_checkbox = QCheckBox("Show tile grid")
+        self.show_grid_checkbox = QCheckBox("Show ti&le grid")
         self.show_grid_checkbox.setChecked(True)
         # Never narrower than its text; the hint beside it wraps instead.
         self.show_grid_checkbox.setSizePolicy(QSizePolicy.Policy.Minimum,
                                               QSizePolicy.Policy.Fixed)
         self.show_grid_checkbox.toggled.connect(self.grid_preview.set_show_grid)
         controls.addWidget(self.show_grid_checkbox)
-        controls.addWidget(HintLabel("Scroll to zoom, drag to pan"), 1)
+        controls.addWidget(HintLabel(VIEW_HINT), 1)
         fit_btn = QPushButton("Fit")
         fit_btn.clicked.connect(self.grid_preview.fit)
         controls.addWidget(fit_btn)
@@ -659,6 +675,29 @@ class MosaicApp(QMainWindow):
         self.progress_widget.setVisible(False)
         bar.addPermanentWidget(self.progress_widget)
 
+    def _build_shortcuts(self):
+        """Window-wide keys for the main actions.
+
+        Each presses its button, so a key does nothing a click couldn't,
+        such as generate before both inputs are chosen.
+        """
+        buttons = {"choose_photo": self.select_image_btn,
+                   "choose_tiles": self.tiles_browse_btn,
+                   "generate": self.generate_btn,
+                   "cancel": self.cancel_btn}
+        self.shortcut_actions = {}
+        for name, keys in SHORTCUTS.items():
+            button = buttons[name]
+            action = QAction(self)
+            action.setShortcuts([QKeySequence(k) for k in keys])
+            action.triggered.connect(button.click)
+            self.addAction(action)
+            self.shortcut_actions[name] = action
+            shown = QKeySequence(keys[0]).toString(
+                QKeySequence.SequenceFormat.NativeText)
+            tip = button.toolTip()
+            button.setToolTip(f"{tip} ({shown})" if tip else shown)
+
     # ------------------------------------------------------------------
     # Photo and tile folder
     # ------------------------------------------------------------------
@@ -688,7 +727,7 @@ class MosaicApp(QMainWindow):
             Qt.TransformationMode.SmoothTransformation))
         self.guide_name_label.setText(os.path.basename(file_path))
         self.guide_size_label.setText(f"{width} × {height} px")
-        self.select_image_btn.setText("Change Photo…")
+        self.select_image_btn.setText("Change &Photo…")
         self.photo_status_label.set_status(kind="done", spoken="Photo chosen")
         announce(self, f"Photo chosen: {os.path.basename(file_path)}, "
                        f"{width} by {height} pixels")
@@ -871,7 +910,7 @@ class MosaicApp(QMainWindow):
         if custom:
             self.tile_shape_buttons[-1].setChecked(True)
         self.custom_tile_row.setVisible(custom)
-        self.tile_size_label.setText("Width" if custom else "Size")
+        self.tile_size_label.setText("Wi&dth" if custom else "Si&ze")
         self.tile_width_spinbox.setAccessibleName(
             "Tile width" if custom else "Tile size")
 
