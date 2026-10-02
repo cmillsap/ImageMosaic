@@ -1,5 +1,9 @@
 # Image Mosaic Generator
 
+<p align="center">
+  <img src="docs/Chicago_Sailboat_mosaic.jpg" alt="A sailboat in front of the Chicago skyline, rebuilt as a mosaic of tile photographs" width="600">
+</p>
+
 A desktop application built with PyQt6 that rebuilds a guide image out of a
 library of tile photographs, matching each cell of the image to the closest
 photo by colour.
