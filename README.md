@@ -51,7 +51,8 @@ your PC" on first run. *More info* > *Run anyway* gets past it.
 
 ### From source
 
-Requires Python 3.8 or higher.
+Requires Python 3.10 or higher (the pinned `onnxruntime` has no wheels
+for older versions).
 
 ```bash
 python -m venv venv
@@ -316,13 +317,27 @@ respond to synthetic shapes. Place `face.jpg` (containing a face) and
 format tests likewise need a `test.HEIC` and a `test.DNG`. All four are
 gitignored and skip cleanly when absent.
 
+The tile filter's tests run against a stand-in for the model. To also run
+the one that uses the real model, point `TILE_FILTER_MODEL` at a
+downloaded copy - after turning the filter on once, that is
+`%LOCALAPPDATA%\ImageMosaic\models\clip-vit-b32-vision-fp16.onnx`:
+
+```powershell
+$env:TILE_FILTER_MODEL = "$env:LOCALAPPDATA\ImageMosaic\models\clip-vit-b32-vision-fp16.onnx"
+python -m pytest test_tile_filter.py
+```
+
 ## Requirements
 
-- Python 3.8+
+- Python 3.10+
 - PyQt6, Pillow, pillow-heif, rawpy, NumPy, scikit-learn,
-  opencv-contrib-python
+  opencv-contrib-python, onnxruntime
 
 ## Possible enhancements
+
+- Let **Show skipped…** put a wrongly skipped tile back
+- A strictness setting for the screenshot filter (its threshold is fixed
+  at 0.5)
 
 - Expose the candidate pool size, which trades colour accuracy for variety
 - `rawpy` support for `.crw` / `.cr3` / full-resolution `.dng`
