@@ -40,7 +40,7 @@ through it.
 
 ### Windows installer
 
-Run `ImageMosaic-1.4.0-Setup.exe` and follow the prompts. Python is not
+Run `ImageMosaic-1.5.0-Setup.exe` and follow the prompts. Python is not
 required - the installer carries its own. It installs per-user by default,
 so there is no UAC prompt; choose *Install for all users* on the first page
 to put it in `Program Files` instead. The app then appears in the Start
@@ -270,7 +270,7 @@ powershell -ExecutionPolicy Bypass -File packaging\build.ps1
 
 Two stages, both driven by that script: PyInstaller freezes the app into
 `dist\ImageMosaic`, then Inno Setup packs that folder into
-`dist\ImageMosaic-1.4.0-Setup.exe`. PyInstaller is installed into the venv
+`dist\ImageMosaic-1.5.0-Setup.exe`. PyInstaller is installed into the venv
 on demand; Inno Setup 6 must already be present, via
 `winget install JRSoftware.InnoSetup`. Pass `-SkipApp` to recompile only
 the installer when the frozen app is already built.
@@ -283,7 +283,7 @@ the installer when the frozen app is already built.
 | `packaging/make_icon.py` | Regenerates `icon.ico`; committed, rarely needed |
 | `packaging/make_filter_prompts.py` | Regenerates `tile_filter_prompts.npz`; committed, rarely needed |
 
-The frozen build is ~419 MB, which solid LZMA2 compresses to an ~96 MB
+The frozen build is ~419 MB, which solid LZMA2 compresses to an ~98 MB
 setup. Four things in it are load-bearing:
 
 - **`multiprocessing.freeze_support()` in `main()`.** Tile analysis spawns
