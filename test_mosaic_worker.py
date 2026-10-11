@@ -23,6 +23,7 @@ from mosaic_worker import (
     STAGE_WEIGHTS,
     CancellationToken,
     MosaicJob,
+    ModelDownloadWorker,
     MosaicWorker,
 )
 
@@ -376,3 +377,133 @@ class TestCancellation:
 
         assert outcome == ['cancelled'], outcome
         assert not os.path.exists(job.output_path)
+
+
+# ============================================================================
+# Tile filter
+# ============================================================================
+
+class _RedIsJunk:
+    """Stands in for the filter's model: red tiles are documents."""
+
+    def __init__(self, model_file):
+        pass
+
+    def score(self, images):
+        return [(0.9, "Document") if img[..., 0].mean() > 200
+                and img[..., 1:].mean() < 50 else (0.1, "Map")
+                for img in images]
+
+
+class TestTileFilter:
+
+    @pytest.fixture(autouse=True)
+    def fake_model(self, monkeypatch):
+        import tile_loader
+        monkeypatch.setattr(tile_loader, "JunkScorer", _RedIsJunk)
+
+    def test_off_by_default(self, job):
+        assert job.filter_config() is None
+
+    def test_config_shares_the_tile_cache(self, job):
+        job.filter_model_path = "model.onnx"
+        config = job.filter_config()
+        assert config.model_path == "model.onnx"
+        assert config.cache_dir == job.cache_dir
+
+    def test_reports_excluded_tiles(self, qapp, job, tile_folder):
+        job.filter_model_path = "model.onnx"
+        worker = MosaicWorker(job)
+        record = collect(worker)
+        excluded = []
+        worker.tiles_excluded.connect(excluded.append)
+        worker.run()
+
+        assert len(record['finished']) == 1
+        assert excluded == [[(os.path.join(tile_folder, 'tile_2.png'),
+                              "Document")]]
+
+    def test_excluded_tiles_are_not_placed(self, qapp, job, tile_folder):
+        job.filter_model_path = "model.onnx"
+        worker = MosaicWorker(job)
+        record = collect(worker)
+        worker.run()
+
+        stats = record['finished'][0][1]
+        assert stats.distinct_tiles <= 7
+
+    def test_no_report_when_off(self, qapp, job):
+        worker = MosaicWorker(job)
+        excluded = []
+        worker.tiles_excluded.connect(excluded.append)
+        worker.run()
+        assert excluded == []
+
+    def test_everything_excluded_says_why(self, qapp, job, temp_dir):
+        folder = os.path.join(temp_dir, 'red')
+        os.makedirs(folder)
+        for i in range(3):
+            Image.new('RGB', (30, 30), (255, 0, 0)).save(
+                os.path.join(folder, f'r{i}.png'))
+        job.tile_folder_path = folder
+        job.filter_model_path = "model.onnx"
+
+        worker = MosaicWorker(job)
+        record = collect(worker)
+        worker.run()
+
+        assert len(record['failed']) == 1
+        assert 'screenshot' in record['failed'][0]
+
+
+class TestModelDownloadWorker:
+
+    def _source(self, temp_dir, data=b"model bytes" * 1000):
+        path = os.path.join(temp_dir, 'source.onnx')
+        with open(path, 'wb') as f:
+            f.write(data)
+        import hashlib
+        return ("file:///" + path.replace("\\", "/"),
+                hashlib.sha256(data).hexdigest())
+
+    def _record(self, worker):
+        record = {'finished': [], 'failed': [], 'cancelled': 0,
+                  'progress': []}
+        worker.finished.connect(record['finished'].append)
+        worker.failed.connect(record['failed'].append)
+        worker.cancelled.connect(
+            lambda: record.__setitem__('cancelled', record['cancelled'] + 1))
+        worker.progress.connect(lambda d, t: record['progress'].append(d))
+        return record
+
+    def test_success(self, qapp, temp_dir):
+        url, digest = self._source(temp_dir)
+        worker = ModelDownloadWorker(os.path.join(temp_dir, 'models'),
+                                     url=url, sha256=digest)
+        record = self._record(worker)
+        worker.run()
+
+        assert len(record['finished']) == 1
+        assert os.path.exists(record['finished'][0])
+        assert record['progress']
+
+    def test_failure(self, qapp, temp_dir):
+        url, _ = self._source(temp_dir)
+        worker = ModelDownloadWorker(os.path.join(temp_dir, 'models'),
+                                     url=url, sha256="0" * 64)
+        record = self._record(worker)
+        worker.run()
+
+        assert record['finished'] == []
+        assert len(record['failed']) == 1
+
+    def test_cancel(self, qapp, temp_dir):
+        url, digest = self._source(temp_dir)
+        worker = ModelDownloadWorker(os.path.join(temp_dir, 'models'),
+                                     url=url, sha256=digest)
+        record = self._record(worker)
+        worker.token.cancel()
+        worker.run()
+
+        assert record['cancelled'] == 1
+        assert record['finished'] == []

@@ -10,7 +10,7 @@ import logging
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Callable, List, Optional, Tuple
 
 from PIL import Image
 
@@ -476,12 +476,17 @@ class TilePreprocessor:
         self._crop_calculator = CropCalculator(self.config.target_aspect_ratio)
         self._cache = TilePreprocessorCache(self.config.cache_dir)
 
-    def preprocess_image(self, image_path: str) -> Image.Image:
+    def preprocess_image(self, image_path: str,
+                         on_decoded: Optional[Callable[[Image.Image], None]] = None
+                         ) -> Image.Image:
         """
         Preprocess an image: rescale if needed, detect subject, and crop.
 
         Args:
             image_path: Path to the source image
+            on_decoded: Called with the whole decoded photo, before it is
+                cropped, so another consumer can share the decode. Not
+                called when the result comes from the cache.
 
         Returns:
             Preprocessed PIL Image at exactly target_width x target_height
@@ -518,6 +523,8 @@ class TilePreprocessor:
 
             # Rescale if needed
             working_img = self._rescale_if_needed(working_img)
+            if on_decoded is not None:
+                on_decoded(working_img)
 
             # Detect region of interest
             region = self._detect_region_of_interest(working_img)

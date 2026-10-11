@@ -40,9 +40,15 @@ def settings(tmp_path):
 
 
 @pytest.fixture
-def window(qapp, settings):
+def model_dir(tmp_path):
+    """The filter model's folder, never the user's real one."""
+    return str(tmp_path / "models")
+
+
+@pytest.fixture
+def window(qapp, settings, model_dir):
     """A fresh MosaicApp window per test."""
-    w = MosaicApp(settings)
+    w = MosaicApp(settings, model_dir=model_dir)
     yield w
     w.close()
 
@@ -1187,3 +1193,176 @@ class TestStretchWarning:
         assert window.preview_controls.isEnabled() is False
         self._guide(window, tmp_path, (200, 300))
         assert window.preview_controls.isEnabled() is True
+
+
+# ============================================================================
+# Tile filter
+# ============================================================================
+
+class TestTileFilter:
+
+    @pytest.fixture
+    def installed(self, monkeypatch):
+        """Pretend the 176 MB model has been downloaded."""
+        import tile_filter
+        monkeypatch.setattr(tile_filter, "is_model_installed",
+                            lambda _dir: True)
+
+    def _answer(self, monkeypatch, button):
+        asked = []
+        monkeypatch.setattr(QMessageBox, "question",
+                            lambda *a, **k: asked.append(a) or button)
+        return asked
+
+    def _drain(self, window, qapp):
+        while window.download_thread is not None:
+            qapp.processEvents()
+
+    def _source(self, tmp_path):
+        import hashlib
+        data = b"model" * 5000
+        path = tmp_path / "source.onnx"
+        path.write_bytes(data)
+        return path.as_uri(), hashlib.sha256(data).hexdigest()
+
+    def test_off_by_default(self, window):
+        assert window.filter_checkbox.isChecked() is False
+        assert window.build_job("out.png").filter_model_path is None
+
+    def test_has_an_access_key_and_explains_itself(self, window):
+        assert "&k" in window.filter_checkbox.text()
+        assert window.filter_checkbox.toolTip()
+
+    def test_turning_on_with_model_installed(self, window, installed, settings,
+                                             model_dir, monkeypatch):
+        asked = self._answer(monkeypatch, QMessageBox.StandardButton.No)
+        window.filter_checkbox.setChecked(True)
+
+        assert asked == []
+        assert settings.value("skip_junk_tiles", type=bool) is True
+        path = window.build_job("out.png").filter_model_path
+        assert path == os.path.join(model_dir, "clip-vit-b32-vision-fp16.onnx")
+
+    def test_turning_off(self, window, installed, settings):
+        window.filter_checkbox.setChecked(True)
+        window.filter_checkbox.setChecked(False)
+
+        assert settings.value("skip_junk_tiles", type=bool) is False
+        assert window.build_job("out.png").filter_model_path is None
+
+    def test_remembered_across_launches(self, qapp, settings, model_dir,
+                                        installed):
+        settings.setValue("skip_junk_tiles", True)
+        w = MosaicApp(settings, model_dir=model_dir)
+        try:
+            assert w.filter_checkbox.isChecked() is True
+        finally:
+            w.close()
+
+    def test_not_restored_without_its_model(self, qapp, settings, model_dir):
+        settings.setValue("skip_junk_tiles", True)
+        w = MosaicApp(settings, model_dir=model_dir)
+        try:
+            assert w.filter_checkbox.isChecked() is False
+        finally:
+            w.close()
+
+    def test_declining_the_download_leaves_it_off(self, window, monkeypatch):
+        asked = self._answer(monkeypatch, QMessageBox.StandardButton.No)
+        window.filter_checkbox.setChecked(True)
+
+        assert len(asked) == 1
+        assert window.filter_checkbox.isChecked() is False
+        assert window.download_thread is None
+
+    def test_download_runs_off_the_gui_thread(self, window, qapp, tmp_path,
+                                              model_dir, settings):
+        url, digest = self._source(tmp_path)
+        window._set_filter_checked(True)
+        window.download_filter_model(url=url, sha256=digest)
+
+        assert window.download_worker.thread() is window.download_thread
+        assert window.filter_checkbox.isEnabled() is False
+        assert window.progress_widget.isHidden() is False
+        self._drain(window, qapp)
+
+        assert os.path.exists(os.path.join(
+            model_dir, "clip-vit-b32-vision-fp16.onnx"))
+        assert window.filter_checkbox.isChecked() is True
+        assert window.filter_checkbox.isEnabled() is True
+        assert window.progress_widget.isHidden() is True
+        assert settings.value("skip_junk_tiles", type=bool) is True
+
+    def test_failed_download_turns_it_back_off(self, window, qapp, tmp_path,
+                                               monkeypatch):
+        warned = []
+        monkeypatch.setattr(QMessageBox, "warning",
+                            lambda *a, **k: warned.append(a))
+        url, _ = self._source(tmp_path)
+        window._set_filter_checked(True)
+        window.download_filter_model(url=url, sha256="0" * 64)
+        self._drain(window, qapp)
+
+        assert len(warned) == 1
+        assert window.filter_checkbox.isChecked() is False
+
+    def test_cancel_stops_the_download(self, window, qapp, tmp_path):
+        url, digest = self._source(tmp_path)
+        window._set_filter_checked(True)
+        window.download_filter_model(url=url, sha256=digest, chunk_size=1)
+        window.cancel_btn.click()
+        self._drain(window, qapp)
+
+        assert window.filter_checkbox.isChecked() is False
+        assert window.download_worker is None
+
+    def test_generate_waits_for_the_download(self, window, tmp_path):
+        url, digest = self._source(tmp_path)
+        choose_tiles(window)
+        window.guide_image_path = "photo.jpg"
+        window.download_filter_model(url=url, sha256=digest, chunk_size=1)
+        window.check_ready_to_generate()
+
+        assert window.generate_btn.isEnabled() is False
+        window.close()
+
+    def test_skipped_count_and_review(self, window, installed, tmp_path):
+        window.filter_checkbox.setChecked(True)
+        assert window.show_skipped_btn.isHidden() is True
+
+        tile = tmp_path / "receipt.png"
+        Image.new("RGB", (30, 30), "white").save(tile)
+        window.on_tiles_excluded([(str(tile), "Document")])
+
+        assert "1 skipped" in window.filter_status_label.text()
+        assert window.show_skipped_btn.isHidden() is False
+
+        from mosaic_app import SkippedTilesDialog
+        from tile_preprocessor import TilePreprocessorCache
+        dialog = SkippedTilesDialog(window.excluded_tiles,
+                                    TilePreprocessorCache(None), (100, 100))
+        assert dialog.list.count() == 1
+        assert "receipt.png" in dialog.list.item(0).text()
+        assert "Document" in dialog.list.item(0).text()
+
+    def test_render_reports_skipped_tiles(self, window, installed, qapp,
+                                          monkeypatch, tmp_path):
+        import tile_loader
+
+        class Everything:
+            def __init__(self, _model):
+                pass
+
+            def score(self, images):
+                return [(0.9, "Map")] + [(0.1, "Map")] * (len(images) - 1)
+
+        monkeypatch.setattr(tile_loader, "JunkScorer", Everything)
+        monkeypatch.setattr(window, "tile_cache_dir",
+                            lambda: str(tmp_path / "cache"))
+        window.filter_checkbox.setChecked(True)
+
+        TestWorkerLifecycle()._start(window, monkeypatch, str(tmp_path))
+        TestWorkerLifecycle()._drain(window, qapp)
+
+        assert len(window.excluded_tiles) == 1
+        assert window.excluded_tiles[0][1] == "Map"

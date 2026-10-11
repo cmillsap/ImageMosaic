@@ -8,15 +8,20 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                               QFileDialog, QSpinBox, QCheckBox, QProgressBar,
                               QMessageBox, QComboBox, QSplitter, QScrollArea,
                               QTabWidget, QStackedWidget, QSlider, QToolButton,
-                              QButtonGroup, QFrame, QGridLayout, QSizePolicy)
-from PyQt6.QtCore import Qt, QThread, QStandardPaths, QSettings, QEvent, QSize
-from PyQt6.QtGui import QAction, QImage, QKeySequence, QPixmap
+                              QButtonGroup, QFrame, QGridLayout, QSizePolicy,
+                              QDialog, QDialogButtonBox, QListWidget,
+                              QListWidgetItem)
+from PyQt6.QtCore import (Qt, QThread, QStandardPaths, QSettings, QEvent, QSize,
+                          QUrl)
+from PyQt6.QtGui import (QAction, QDesktopServices, QIcon, QImage, QKeySequence,
+                         QPixmap)
 
+import tile_filter
 from image_io import open_image
-from mosaic_worker import MosaicJob, MosaicWorker
+from mosaic_worker import MosaicJob, MosaicWorker, ModelDownloadWorker
 from result_viewer import VIEW_HINT, GridPreview, ResultPanel
 from tile_database import find_tile_files
-from tile_preprocessor import PreprocessorConfig
+from tile_preprocessor import PreprocessorConfig, TilePreprocessorCache
 from ui_support import (HintLabel, StatusLabel, WidestTextLabel, WrapLabel,
                         announce, initial_window_rect, make_secondary,
                         refresh_scaled_fonts, scale_font)
@@ -59,6 +64,15 @@ STRETCH_TOLERANCE = 0.03
 
 # Longest side of the photo kept for the on-screen preview.
 PREVIEW_MAX_DIM = 2048
+
+
+def default_model_folder() -> str:
+    """Where downloaded models live: per-user app data, kept across runs
+    and updates, unlike the tile cache in the temp folder."""
+    data = QStandardPaths.writableLocation(
+        QStandardPaths.StandardLocation.GenericDataLocation)
+    return os.path.normpath(os.path.join(data or os.path.expanduser("~"),
+                                         "ImageMosaic", "models"))
 
 
 def default_output_folder() -> str:
@@ -180,12 +194,74 @@ class _ProgressBar(QProgressBar):
         return QSize(self.fontMetrics().averageCharWidth() * 30, hint.height())
 
 
+class SkippedTilesDialog(QDialog):
+    """Lists the tiles the filter left out of the last mosaic.
+
+    The filter is wrong now and then, so this lets the user see what it
+    dropped. Thumbnails come from the tile cache, which already holds every
+    analysed tile at tile size, so nothing has to be decoded again.
+    """
+
+    def __init__(self, excluded, tile_cache: TilePreprocessorCache,
+                 tile_size, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Skipped Tiles")
+        self.resize(720, 520)
+        layout = QVBoxLayout(self)
+
+        layout.addWidget(WrapLabel(
+            f"{len(excluded):,} images looked like screenshots, maps or "
+            "documents, so they were left out of the mosaic. Double-click "
+            "one to open it."))
+
+        self.list = QListWidget()
+        self.list.setAccessibleName("Skipped tiles")
+        self.list.setViewMode(QListWidget.ViewMode.IconMode)
+        self.list.setIconSize(QSize(96, 96))
+        self.list.setGridSize(QSize(132, 140))
+        self.list.setResizeMode(QListWidget.ResizeMode.Adjust)
+        self.list.setMovement(QListWidget.Movement.Static)
+        self.list.setWordWrap(True)
+        for path, category in sorted(excluded, key=lambda e: (e[1], e[0])):
+            item = QListWidgetItem(f"{category}\n{os.path.basename(path)}")
+            item.setData(Qt.ItemDataRole.UserRole, path)
+            item.setToolTip(path)
+            cached = tile_cache.get_cached(path, tile_size)
+            if cached is not None:
+                data = cached.tobytes()
+                image = QImage(data, cached.width, cached.height,
+                               3 * cached.width,
+                               QImage.Format.Format_RGB888).copy()
+                item.setIcon(QIcon(QPixmap.fromImage(image)))
+            self.list.addItem(item)
+        self.list.itemActivated.connect(self.open_item)
+        layout.addWidget(self.list, 1)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def open_item(self, item: QListWidgetItem):
+        path = item.data(Qt.ItemDataRole.UserRole)
+        QDesktopServices.openUrl(QUrl.fromLocalFile(path))
+
+
 class MosaicApp(QMainWindow):
-    def __init__(self, settings: QSettings = None):
+    def __init__(self, settings: QSettings = None, model_dir: str = None):
         super().__init__()
         # Preferences that outlive the session. Injectable so tests never
         # touch the real user's settings.
         self.settings = settings or QSettings("ImageMosaic", "ImageMosaic")
+        # Where the tile filter's model is downloaded to. Injectable for the
+        # same reason.
+        self.model_dir = model_dir or default_model_folder()
+        # Set while the filter's model is downloading; both None otherwise.
+        self.download_worker = None
+        self.download_thread = None
+        # (path, category) for tiles the filter left out of the last
+        # mosaic, and the tile size they were cached at.
+        self.excluded_tiles = []
+        self._excluded_tile_size = None
         self.guide_image_path = None
         # (width, height) of the guide photo in pixels, once one is chosen.
         self.guide_size = None
@@ -313,6 +389,29 @@ class MosaicApp(QMainWindow):
         self.subdirs_checkbox.setChecked(False)
         self.subdirs_checkbox.stateChanged.connect(self.update_scan_subdirectories)
         layout.addWidget(self.subdirs_checkbox)
+
+        self.filter_checkbox = QCheckBox("S&kip screenshots, maps && documents")
+        self.filter_checkbox.setToolTip(
+            "Leave out tile photos that are really screenshots, maps, "
+            "receipts, documents or memes, as judged by an image-recognition "
+            "model that runs on this computer.")
+        # Only restored on if the model is still there to run it.
+        self.filter_checkbox.setChecked(
+            self.settings.value("skip_junk_tiles", False, type=bool)
+            and tile_filter.is_model_installed(self.model_dir))
+        self.filter_checkbox.toggled.connect(self.on_filter_toggled)
+        layout.addWidget(self.filter_checkbox)
+
+        row = QHBoxLayout()
+        row.setContentsMargins(24, 0, 0, 0)  # Under the checkbox's text.
+        self.filter_status_label = _secondary(wrap=True)
+        row.addWidget(self.filter_status_label, 1)
+        self.show_skipped_btn = QPushButton("Sh&ow skipped…")
+        self.show_skipped_btn.setAccessibleName("Show skipped tile photos")
+        self.show_skipped_btn.clicked.connect(self.show_skipped_tiles)
+        row.addWidget(self.show_skipped_btn)
+        layout.addLayout(row)
+        self.update_filter_status()
         return box
 
     def _build_print_section(self) -> QWidget:
@@ -786,6 +885,133 @@ class MosaicApp(QMainWindow):
             announce(self, status.accessibleName())
         self.check_ready_to_generate()
 
+    # Tile filter
+
+    def on_filter_toggled(self, checked: bool):
+        """Turn the tile filter on or off, downloading its model if needed."""
+        if checked and not tile_filter.is_model_installed(self.model_dir):
+            size_mb = tile_filter.MODEL_SIZE / 1e6
+            answer = QMessageBox.question(
+                self, "Download screenshot filter?",
+                "Skipping screenshots, maps and documents needs an "
+                f"image-recognition model ({size_mb:.0f} MB), downloaded "
+                "once and then run on this computer. Your photos are never "
+                "uploaded.\n\nDownload it now?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.Yes)
+            if answer != QMessageBox.StandardButton.Yes:
+                self._set_filter_checked(False)
+                return
+            self.download_filter_model()
+            return
+        self.settings.setValue("skip_junk_tiles", checked)
+        self.update_filter_status()
+
+    def _set_filter_checked(self, checked: bool):
+        """Change the checkbox without starting another download."""
+        self.filter_checkbox.blockSignals(True)
+        self.filter_checkbox.setChecked(checked)
+        self.filter_checkbox.blockSignals(False)
+        self.update_filter_status()
+
+    def update_filter_status(self):
+        """The line under the filter checkbox: what it will do or did."""
+        if self.download_worker is not None:
+            text = "Downloading the model…"
+        elif not self.filter_checkbox.isChecked():
+            text = ""
+        elif self.excluded_tiles:
+            count = len(self.excluded_tiles)
+            text = (f"{count:,} skipped from the last mosaic."
+                    if count != 1 else "1 skipped from the last mosaic.")
+        else:
+            text = ("Checked when you generate. The first run over a "
+                    "library takes a little longer.")
+        self.filter_status_label.setText(text)
+        self.filter_status_label.setVisible(bool(text))
+        self.show_skipped_btn.setVisible(
+            bool(self.excluded_tiles) and self.filter_checkbox.isChecked()
+            and self.download_worker is None)
+
+    def download_filter_model(self, **download_args):
+        """Fetch the model on a worker thread, showing progress below.
+
+        download_args go to tile_filter.download_model; tests use them.
+        """
+        self.download_worker = ModelDownloadWorker(self.model_dir,
+                                                   **download_args)
+        self.download_thread = QThread(self)
+        self.download_worker.moveToThread(self.download_thread)
+        self.download_thread.started.connect(self.download_worker.run)
+        self.download_worker.progress.connect(self.on_download_progress)
+        self.download_worker.finished.connect(self.on_download_finished)
+        self.download_worker.failed.connect(self.on_download_failed)
+        self.download_worker.cancelled.connect(self.on_download_cancelled)
+
+        self.filter_checkbox.setEnabled(False)
+        self.update_filter_status()
+        self.show_progress()
+        self.set_progress_status("Downloading screenshot filter...")
+        announce(self, "Downloading screenshot filter")
+        self.download_thread.start()
+
+    def on_download_progress(self, done: int, total: int):
+        self.set_progress(
+            "Downloading screenshot filter...  "
+            f"({done / 1e6:.0f} of {total / 1e6:.0f} MB)",
+            int(100 * done / total) if total else 0)
+
+    def on_download_finished(self, _path: str):
+        self._teardown_download()
+        self.settings.setValue("skip_junk_tiles", True)
+        self.update_filter_status()
+        self.set_progress_status("Screenshot filter ready")
+        announce(self, "Screenshot filter downloaded", important=True)
+
+    def on_download_failed(self, message: str):
+        self._teardown_download()
+        self._set_filter_checked(False)
+        QMessageBox.warning(
+            self, "Download failed",
+            "The screenshot filter could not be downloaded. Check your "
+            f"internet connection and try again.\n\n{message}")
+
+    def on_download_cancelled(self):
+        self._teardown_download()
+        self._set_filter_checked(False)
+        self.set_progress_status("Download cancelled")
+        announce(self, "Download cancelled")
+
+    def _teardown_download(self):
+        if self.download_thread is not None:
+            self.download_thread.quit()
+            self.download_thread.wait()
+            self.download_thread.deleteLater()
+            self.download_thread = None
+        if self.download_worker is not None:
+            self.download_worker.deleteLater()
+            self.download_worker = None
+        self.filter_checkbox.setEnabled(True)
+        self.hide_progress()
+
+    def filter_model_path(self):
+        """The model for this run, or None when the filter is off."""
+        if (self.filter_checkbox.isChecked()
+                and tile_filter.is_model_installed(self.model_dir)):
+            return tile_filter.model_path(self.model_dir)
+        return None
+
+    def on_tiles_excluded(self, excluded):
+        self.excluded_tiles = excluded
+        self._excluded_tile_size = (self.tile_width, self.tile_height)
+        self.update_filter_status()
+
+    def show_skipped_tiles(self):
+        dialog = SkippedTilesDialog(
+            self.excluded_tiles, TilePreprocessorCache(self.tile_cache_dir()),
+            self._excluded_tile_size, self)
+        dialog.exec()
+
     def dragEnterEvent(self, event):
         if self.worker_thread is None and self._dropped_path(event):
             event.acceptProposedAction()
@@ -1141,7 +1367,8 @@ class MosaicApp(QMainWindow):
             reason = "Make the tiles smaller or the print larger."
         else:
             reason = ""
-        running = self.worker_thread is not None
+        running = (self.worker_thread is not None
+                   or self.download_thread is not None)
         self.generate_btn.setEnabled(not reason and not running)
         self.generate_hint_label.setText(reason)
         self.generate_hint_label.setVisible(bool(reason))
@@ -1202,6 +1429,7 @@ class MosaicApp(QMainWindow):
             randomize_order=self.randomize_order_checkbox.isChecked(),
             tint_strength=self.tint_slider.value(),
             cache_dir=self.tile_cache_dir(),
+            filter_model_path=self.filter_model_path(),
         )
 
     def tile_cache_dir(self) -> str:
@@ -1223,7 +1451,7 @@ class MosaicApp(QMainWindow):
 
     def generate_mosaic(self):
         """Validate, pick an output path, and start the worker thread."""
-        if self.worker_thread is not None:
+        if self.worker_thread is not None or self.download_thread is not None:
             return  # Already running.
 
         if self.total_tiles == 0:
@@ -1239,6 +1467,8 @@ class MosaicApp(QMainWindow):
             return
 
         job = self.build_job(output_path)
+        self.excluded_tiles = []
+        self.update_filter_status()
 
         self.worker = MosaicWorker(job)
         self.worker_thread = QThread(self)
@@ -1250,6 +1480,7 @@ class MosaicApp(QMainWindow):
         self.worker.finished.connect(self.on_render_finished)
         self.worker.failed.connect(self.on_render_failed)
         self.worker.cancelled.connect(self.on_render_cancelled)
+        self.worker.tiles_excluded.connect(self.on_tiles_excluded)
 
         self.show_progress()
         self._announced_stage = None
@@ -1257,7 +1488,14 @@ class MosaicApp(QMainWindow):
         self.worker_thread.start()
 
     def cancel_mosaic(self):
-        """Ask the running worker to stop at its next checkpoint."""
+        """Ask the running worker to stop at its next checkpoint.
+
+        Cancel also stops a model download, which shares the progress bar.
+        """
+        if self.download_worker is not None:
+            self.cancel_btn.setEnabled(False)
+            self.set_progress_status("Cancelling...")
+            self.download_worker.token.cancel()
         if self.worker is not None:
             self.cancel_btn.setEnabled(False)
             self.set_progress_status("Cancelling...")
@@ -1326,6 +1564,9 @@ class MosaicApp(QMainWindow):
         if self.worker is not None:
             self.worker.cancel()
         self._teardown_worker()
+        if self.download_worker is not None:
+            self.download_worker.token.cancel()
+            self._teardown_download()
         super().closeEvent(event)
 
 

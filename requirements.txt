@@ -12,3 +12,9 @@ numpy==1.26.2
 # the base opencv-python package. Pinned to 4.x because 5.x requires numpy>=2,
 # which is incompatible with the scikit-learn pin above.
 opencv-contrib-python==4.10.0.84
+# Runs the screenshot filter's CLIP model (tile_filter.py). The model itself
+# is downloaded on demand, not installed. Pinned to 1.20.x: 1.21+ needs a
+# newer MSVC runtime than the msvcp140.dll scikit-learn 1.3.2 bundles, and
+# crashes on import whenever sklearn happens to load first (it does in
+# PyInstaller's analysis, and can in a frozen build).
+onnxruntime==1.20.1

@@ -15,6 +15,7 @@ from sklearn.neighbors import NearestNeighbors
 from tile_analyzer import TileData, ImageTileAnalyzer, ColorAverage
 
 if TYPE_CHECKING:
+    from tile_filter import FilterConfig
     from tile_preprocessor import PreprocessorConfig, TilePreprocessor
 
 logger = logging.getLogger(__name__)
@@ -122,6 +123,8 @@ class TileDatabase:
         self._metric = metric
         self._is_fitted = False
         self._preprocessor = preprocessor
+        #: (path, category) for each tile the tile filter left out
+        self.excluded_tiles: List[Tuple[str, str]] = []
 
     def add_tile(self, tile_data: TileData) -> None:
         """
@@ -229,7 +232,9 @@ class TileDatabase:
                             progress_callback: Optional[
                                 Callable[[int, int, str], None]] = None,
                             should_cancel: Optional[
-                                Callable[[], bool]] = None) -> int:
+                                Callable[[], bool]] = None,
+                            filter_config: Optional['FilterConfig'] = None,
+                            ) -> int:
         """
         Load tiles using a pool of worker processes.
 
@@ -248,24 +253,40 @@ class TileDatabase:
             auto_build_index: Build the search index after loading
             progress_callback: Called as (completed, total, message)
             should_cancel: Polled as results arrive; stops early when True
+            filter_config: Leave out screenshots, maps and documents, as
+                       judged by the tile filter. What it leaves out is
+                       listed in excluded_tiles.
 
         Returns:
-            Number of tiles successfully loaded
+            Number of tiles successfully loaded, not counting excluded ones
 
         Raises:
             FileNotFoundError: If folder doesn't exist
+            tile_loader.FilterUnavailable: If the filter's model won't load
         """
+        from tile_filter import is_junk
         from tile_loader import analyse_paths
 
         paths = self.find_tile_files(folder_path, extensions, recursive)
         tiles = analyse_paths(paths, config, max_workers=max_workers,
                               progress_callback=progress_callback,
-                              should_cancel=should_cancel)
+                              should_cancel=should_cancel,
+                              filter_config=filter_config)
 
         skipped = len(paths) - len(tiles)
         if skipped:
             logger.warning("Skipped %d unreadable tile(s) of %d.",
                            skipped, len(paths))
+
+        if filter_config is not None:
+            kept = []
+            for tile in tiles:
+                if is_junk(tile, filter_config.threshold):
+                    self.excluded_tiles.append(
+                        (tile.image_path, tile.filter_result[1]))
+                else:
+                    kept.append(tile)
+            tiles = kept
 
         for tile in tiles:
             self.add_tile(tile)
@@ -356,6 +377,7 @@ class TileDatabase:
         self._knn_model = None
         self._feature_matrix = None
         self._is_fitted = False
+        self.excluded_tiles = []
 
     def is_ready(self) -> bool:
         """

@@ -24,7 +24,9 @@ from mosaic_renderer import (
     RenderConfig,
     RenderStats,
 )
+import tile_filter
 from tile_database import TileDatabase
+from tile_filter import FilterConfig
 from tile_preprocessor import PreprocessorConfig, TilePreprocessor
 
 logger = logging.getLogger(__name__)
@@ -82,6 +84,14 @@ class MosaicJob:
     cache_dir: Optional[str] = None
     #: Worker processes for tile analysis; None picks a capped core count.
     max_workers: Optional[int] = None
+    #: The tile filter's downloaded model; None leaves every tile in.
+    filter_model_path: Optional[str] = None
+
+    def filter_config(self) -> Optional[FilterConfig]:
+        if self.filter_model_path is None:
+            return None
+        return FilterConfig(model_path=self.filter_model_path,
+                            cache_dir=self.cache_dir)
 
     def preprocessor_config(self) -> PreprocessorConfig:
         """Tile dimensions come from one place so cells and tiles agree."""
@@ -133,6 +143,9 @@ class MosaicWorker(QObject):
     failed = pyqtSignal(str)
     #: Emitted instead of finished when the user cancels
     cancelled = pyqtSignal()
+    #: (path, category) for each tile the tile filter left out; emitted
+    #: once tiles are loaded, only when the filter is on
+    tiles_excluded = pyqtSignal(object)
 
     def __init__(self, job: MosaicJob,
                  token: Optional[CancellationToken] = None,
@@ -215,15 +228,23 @@ class MosaicWorker(QObject):
             max_workers=job.max_workers,
             progress_callback=self._callback("Loading tiles..."),
             should_cancel=self.is_cancelled,
+            filter_config=job.filter_config(),
         )
 
         if self.is_cancelled():
             return None
+        if job.filter_model_path is not None:
+            self.tiles_excluded.emit(list(database.excluded_tiles))
         if loaded == 0:
+            where = (" or its subfolders" if job.scan_subdirectories else "")
+            if database.excluded_tiles:
+                raise RuntimeError(
+                    f"Every image in {job.tile_folder_path}{where} looks "
+                    "like a screenshot, map or document. Turn off \"Skip "
+                    "screenshots, maps & documents\" to use them anyway.")
             raise RuntimeError(
                 f"No usable tile images found in {job.tile_folder_path}"
-                + (" or its subfolders." if job.scan_subdirectories else ".")
-            )
+                f"{where}.")
 
         # --- Analyse the guide image ------------------------------------
         self._report("Analysing guide image...", 0, 1)
@@ -277,3 +298,44 @@ class MosaicWorker(QObject):
             mosaic = mosaic.convert('RGB')
 
         mosaic.save(path, **save_args)
+
+
+class ModelDownloadWorker(QObject):
+    """Downloads the tile filter's model off the GUI thread.
+
+    Move onto a QThread and connect `run` to the thread's `started` signal.
+    Exactly one of finished/cancelled/failed is emitted per run. Cancel it
+    through `token`, for the reasons given on MosaicWorker.cancel.
+    """
+
+    #: (bytes so far, total bytes)
+    progress = pyqtSignal(object, object)
+    #: Path of the installed model
+    finished = pyqtSignal(str)
+    #: Human-readable failure message
+    failed = pyqtSignal(str)
+    cancelled = pyqtSignal()
+
+    def __init__(self, model_dir: str, parent: Optional[QObject] = None,
+                 **download_args):
+        """download_args are passed on to tile_filter.download_model; tests
+        use them to point it at a local file."""
+        super().__init__(parent)
+        self.model_dir = model_dir
+        self.token = CancellationToken()
+        self._download_args = download_args
+
+    def run(self) -> None:
+        try:
+            path = tile_filter.download_model(
+                self.model_dir,
+                progress_callback=self.progress.emit,
+                should_cancel=self.token.is_cancelled,
+                **self._download_args)
+        except tile_filter.DownloadCancelled:
+            self.cancelled.emit()
+        except Exception as e:                      # noqa: BLE001
+            logger.exception("Model download failed")
+            self.failed.emit(str(e) or e.__class__.__name__)
+        else:
+            self.finished.emit(path)

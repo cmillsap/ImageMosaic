@@ -76,6 +76,11 @@ class TileData:
 
         self.image_path = image_path
         self.sections = sections
+        # Set by the tile filter, when it runs: (junk probability, category).
+        self.filter_result = None
+        # The tile as the filter's model sees it, carried from a worker
+        # process to the scorer and dropped once scored.
+        self.clip_input = None
 
     def get_section(self, row: int, col: int) -> SectionData:
         """

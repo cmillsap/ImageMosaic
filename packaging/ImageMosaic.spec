@@ -19,6 +19,10 @@ PROJECT_ROOT = os.path.abspath(os.path.join(SPECPATH, os.pardir))
 # does not always carry the XML cascades across.
 datas = collect_data_files("cv2", includes=["data/*.xml"])
 
+# The screenshot filter's prompt embeddings, read next to tile_filter.py.
+# The model they pair with is downloaded at runtime, not bundled.
+datas.append((os.path.join(PROJECT_ROOT, "tile_filter_prompts.npz"), "."))
+
 a = Analysis(
     [os.path.join(PROJECT_ROOT, "mosaic_app.py")],
     pathex=[PROJECT_ROOT],

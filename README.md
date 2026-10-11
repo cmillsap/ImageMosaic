@@ -29,6 +29,7 @@ through it.
 | `tile_database.py` | k-NN colour index over the tile library |
 | `guide_image.py` | Divides the guide image into analysed grid cells |
 | `tile_loader.py` | Parallel tile analysis across worker processes |
+| `tile_filter.py` | Spots screenshots, maps and documents among the tiles |
 | `mosaic_renderer.py` | Chooses a tile per cell, then composites |
 | `mosaic_worker.py` | Runs the pipeline off the GUI thread |
 | `mosaic_app.py` | PyQt6 user interface |
@@ -77,7 +78,8 @@ the right. Work down the sidebar:
    it into cells.
 2. **Tile photos** - **Choose…** the folder of tile photos, or drop the
    folder on the preview. The heading shows how many images were found;
-   tick *Include subfolders* to scan nested folders too.
+   tick *Include subfolders* to scan nested folders too. Tick *Skip
+   screenshots, maps & documents* to leave those out (see below).
 3. **Print size** - a common size, or *Custom…* to enter your own in
    inches, with **⇄** to swap portrait and landscape. Output is rendered at
    300 DPI. If the photo's shape differs from the print's, a warning says
@@ -100,6 +102,37 @@ and **Cancel** stops it at any time. When it finishes, the mosaic opens in
 the preview's *Mosaic* tab: scroll to zoom, drag to pan, **Fit** and
 **100%** to jump between the whole mosaic and its actual pixels, and
 **Open Folder** to find the file.
+
+### Skipping screenshots, maps and documents
+
+A phone's camera roll is full of images that are not really photos -
+screenshots, saved maps, receipts, memes - and in a mosaic they show up as
+flat white blocks of text. *Skip screenshots, maps & documents* leaves
+them out.
+
+It uses [CLIP](https://openai.com/research/clip), an image-recognition
+model, to compare each tile with descriptions of junk ("a screenshot of a
+text message conversation", "a receipt") and of ordinary photos. It also
+treats any PNG at an exact phone, tablet or monitor resolution with no
+camera information as a screenshot, which catches lock screens and shared
+stories that CLIP alone lets through. Everything runs on your computer;
+no photo is uploaded.
+
+The model is 176 MB, so it is not in the installer. Ticking the box the
+first time offers to download it to `%LOCALAPPDATA%\ImageMosaic\models`,
+with progress in the status bar. The model makes the first run over a library
+about a third slower (12,270 photos: 527 s against 395 s); scores are
+cached alongside the tile cache, so later runs cost nothing extra.
+
+After a render the line beneath the box says how many tiles were skipped,
+and **Show skipped…** lists them with thumbnails; double-click one to open
+it. On a 12,000-photo test library the filter skipped about 4% of tiles.
+Most were plainly junk, but expect some borderline calls - museum
+placards, gravestones, photos of old computers with text on screen.
+
+To change what counts as junk, edit the prompts in
+`packaging/make_filter_prompts.py`, re-run it, and bump `SCORER_VERSION`
+in `tile_filter.py` so cached scores are recomputed.
 
 ### Keyboard and accessibility
 
@@ -248,9 +281,10 @@ the installer when the frozen app is already built.
 | `packaging/ImageMosaic.spec` | PyInstaller configuration |
 | `packaging/installer.iss` | Inno Setup configuration |
 | `packaging/make_icon.py` | Regenerates `icon.ico`; committed, rarely needed |
+| `packaging/make_filter_prompts.py` | Regenerates `tile_filter_prompts.npz`; committed, rarely needed |
 
-The frozen build is ~354 MB, which solid LZMA2 compresses to an ~85 MB
-setup. Three things in it are load-bearing:
+The frozen build is ~419 MB, which solid LZMA2 compresses to an ~96 MB
+setup. Four things in it are load-bearing:
 
 - **`multiprocessing.freeze_support()` in `main()`.** Tile analysis spawns
   worker processes, and a frozen worker re-executes the exe. Without it
@@ -259,7 +293,11 @@ setup. Three things in it are load-bearing:
   `cv2.data.haarcascades` at runtime and the stock OpenCV hook does not
   reliably carry those XML files across. Miss them and every crop quietly
   falls back to centre.
-- **One folder, not one file.** A one-file build unpacks all 354 MB to temp
+- **onnxruntime stays on 1.20.x.** Newer releases need a newer MSVC
+  runtime than the `msvcp140.dll` scikit-learn bundles, and crash on import
+  whenever sklearn loads first - which PyInstaller's analysis does, failing
+  the build. See `requirements.txt`.
+- **One folder, not one file.** A one-file build unpacks all 419 MB to temp
   on every launch, and each worker process pays that again.
 
 To change the version, edit `AppVersion` in `packaging/installer.iss`.
